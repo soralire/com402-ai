@@ -11,7 +11,7 @@ set -euo pipefail
 #   loads: 10,30,50,70,90
 #   seeds: 1,2,3
 #   threads: 4
-#   seconds: 5
+#   DURATION: 5
 #   mem_node: 1
 #   cpu_node: 0
 #   mem_mb: 512
@@ -22,16 +22,16 @@ OUT_DIR="${OUT_DIR:-results}"
 RAW="${RAW:-$OUT_DIR/results_numa_raw.csv}"
 CLEAN="${CLEAN:-$OUT_DIR/results_numa_clean.csv}"
 
-THREADS="${THREADS:4}"
-SECONDS="${SECONDS:5}"
-MEM_NODE="${MEM_NODE:1}"
-CPU_NODE="${CPU_NODE:0}"
-MEM_MB="${MEM_MB:512}"
-TOUCHES="${TOUCHES:4096}"
+THREADS="${THREADS:-4}"
+DURATION="${DURATION:-5}"
+MEM_NODE="${MEM_NODE:-1}"
+CPU_NODE="${CPU_NODE:-0}"
+MEM_MB="${MEM_MB:-512}"
+TOUCHES="${TOUCHES:-4096}"
 
-LOADS="${LOADS:10 30 50 70 90}"
-SEEDS="${SEEDS:1 2 3}"
-MODES="${MODES:0 1 2}"
+LOADS="${LOADS:-10 30 50 70 90}"
+SEEDS="${SEEDS:-1 2 3}"
+MODES="${MODES:-0 1 2}"
 
 mkdir -p "$OUT_DIR"
 rm -f "$RAW" "$CLEAN"
@@ -44,7 +44,7 @@ for seed in $SEEDS; do
   for load in $LOADS; do
     for mode in $MODES; do
       echo "[RUN] mode=$mode load=$load seed=$seed"
-      "$BIN" "$mode" "$load" "$THREADS" "$SECONDS" "$MEM_NODE" "$CPU_NODE" "$seed" "$MEM_MB" "$TOUCHES" >> "$RAW"
+      "$BIN" "$mode" "$load" "$THREADS" "$DURATION" "$MEM_NODE" "$CPU_NODE" "$seed" "$MEM_MB" "$TOUCHES" >> "$RAW"
     done
   done
 done
