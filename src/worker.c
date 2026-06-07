@@ -116,10 +116,13 @@ static void run_aimd(worker_arg_t *arg) {
             }
         }
 
-        if (sent == cwnd) {
-            if (cwnd < cwnd_max) {
-                cwnd++;
-            }
+        
+// 修复后的 AIMD 窗口逻辑
+if (!failed && sent == old_cwnd) {
+    if (cwnd < cwnd_max) cwnd++;
+    backoff_window_us = 20;
+}
+
             backoff_window_us = 20;
         }
     }

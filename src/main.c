@@ -82,7 +82,7 @@ int main(int argc, char **argv) {
     double elapsed_s = (double)(end_ns - start_ns) / 1000000000.0;
 
     summary_stats_t sum;
-    if (summarize_stats(&args[0].stats, cfg.threads, elapsed_s, &sum) != 0) {
+    if (summarize_worker_stats(args, cfg.threads, elapsed_s, &sum) != 0) {
         fprintf(stderr, "Error: summarize_stats failed\n");
         return 1;
     }

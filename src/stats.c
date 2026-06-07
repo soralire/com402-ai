@@ -58,3 +58,20 @@ int summarize_stats(thread_stats_t *stats, int nthreads, double elapsed_s, summa
     out->goodput = elapsed_s > 0.0 ? (double)out->success / elapsed_s : 0.0;
     return 0;
 }
+
+
+// 新增函数：安全汇总多线程统计
+#include "worker.h"
+
+int summarize_worker_stats(worker_arg_t *args, int nthreads, double elapsed_s, summary_stats_t *out)
+{
+    memset(out, 0, sizeof(summary_stats_t));
+    for (int i = 0; i < nthreads; i++) {
+        out->attempts += args[i].stats.attempts;
+        out->success  += args[i].stats.success;
+        out->retry    += args[i].stats.retry;
+        out->backoff  += args[i].stats.backoff;
+        // 延迟百分位可单独合并延迟数组
+    }
+    return 0;
+}
