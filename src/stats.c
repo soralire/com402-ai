@@ -1,5 +1,6 @@
 #include "stats.h"
 #include "utils.h"
+#include "worker.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -60,18 +61,39 @@ int summarize_stats(thread_stats_t *stats, int nthreads, double elapsed_s, summa
 }
 
 
-// 新增函数：安全汇总多线程统计
-#include "worker.h"
+int summarize_worker_stats(worker_arg_t *args, int nthreads, double elapsed_s, summary_stats_t *out) {
+    memset(out, 0, sizeof(*out));
 
-int summarize_worker_stats(worker_arg_t *args, int nthreads, double elapsed_s, summary_stats_t *out)
-{
-    memset(out, 0, sizeof(summary_stats_t));
     for (int i = 0; i < nthreads; i++) {
-        out->attempts += args[i].stats.attempts;
-        out->success  += args[i].stats.success;
-        out->retry    += args[i].stats.retry;
-        out->backoff  += args[i].stats.backoff;
-        // 延迟百分位可单独合并延迟数组
+        thread_stats_t *s = &args[i].stats;
+        out->attempts += s->attempts;
+        out->success += s->success;
+        out->retry += s->retry;
+        out->backoff += s->backoff;
+        out->latency_count += s->latency_count;
     }
+
+    uint64_t *all = NULL;
+    if (out->latency_count > 0) {
+        all = malloc(sizeof(uint64_t) * out->latency_count);
+        if (!all) {
+            return -1;
+        }
+
+        uint64_t pos = 0;
+        for (int i = 0; i < nthreads; i++) {
+            thread_stats_t *s = &args[i].stats;
+            memcpy(&all[pos], s->latencies, sizeof(uint64_t) * s->latency_count);
+            pos += s->latency_count;
+        }
+
+        qsort(all, out->latency_count, sizeof(uint64_t), cmp_u64);
+        out->p50 = percentile(all, out->latency_count, 50.0);
+        out->p95 = percentile(all, out->latency_count, 95.0);
+        out->p99 = percentile(all, out->latency_count, 99.0);
+        free(all);
+    }
+
+    out->goodput = elapsed_s > 0.0 ? (double)out->success / elapsed_s : 0.0;
     return 0;
 }

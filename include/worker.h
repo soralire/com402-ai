@@ -9,7 +9,7 @@
 
 #define MAX_LAT_PER_THREAD 200000
 
-typedef struct {
+typedef struct worker_arg {
     int tid;
     const config_t *cfg;
     memory_region_t *region;
@@ -19,6 +19,8 @@ typedef struct {
 
 extern pthread_mutex_t channel_lock;
 extern volatile int stop_flag;
+
+int summarize_worker_stats(worker_arg_t *args, int nthreads, double elapsed_s, summary_stats_t *out);
 
 void *worker_main(void *p);
 

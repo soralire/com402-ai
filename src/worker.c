@@ -81,9 +81,12 @@ static void run_aimd(worker_arg_t *arg) {
 
     while (!stop_flag) {
         load_sleep(cfg->load, &arg->rng);
-        int sent = 0;
 
-        for (int i = 0; i < cwnd && !stop_flag; i++) {
+        int old_cwnd = cwnd;
+        int sent = 0;
+        int failed = 0;
+
+        for (int i = 0; i < old_cwnd && !stop_flag; i++) {
             arg->stats.attempts++;
             uint64_t t1 = now_ns();
 
@@ -99,9 +102,12 @@ static void run_aimd(worker_arg_t *arg) {
             } else {
                 arg->stats.retry++;
                 arg->stats.backoff++;
+                failed = 1;
 
                 cwnd /= 2;
-                if (cwnd < 1) cwnd = 1;
+                if (cwnd < 1) {
+                    cwnd = 1;
+                }
 
                 usleep(xorshift32(&arg->rng) % (unsigned int)backoff_window_us);
 
@@ -116,13 +122,10 @@ static void run_aimd(worker_arg_t *arg) {
             }
         }
 
-        
-// 修复后的 AIMD 窗口逻辑
-if (!failed && sent == old_cwnd) {
-    if (cwnd < cwnd_max) cwnd++;
-    backoff_window_us = 20;
-}
-
+        if (!failed && sent == old_cwnd) {
+            if (cwnd < cwnd_max) {
+                cwnd++;
+            }
             backoff_window_us = 20;
         }
     }
