@@ -16,6 +16,7 @@ set -euo pipefail
 #   cpu_node: 0
 #   mem_mb: 512
 #   touches_per_req: 4096
+#   queue_depth: 1
 
 BIN="${BIN:-./cxl_numa_csma}"
 OUT_DIR="${OUT_DIR:-results}"
@@ -28,6 +29,7 @@ MEM_NODE="${MEM_NODE:-1}"
 CPU_NODE="${CPU_NODE:-0}"
 MEM_MB="${MEM_MB:-512}"
 TOUCHES="${TOUCHES:-4096}"
+QUEUE_DEPTH="${QUEUE_DEPTH:-1}"
 
 LOADS="${LOADS:-10 30 50 70 90}"
 SEEDS="${SEEDS:-1 2 3}"
@@ -43,8 +45,8 @@ echo "[INFO] Running batch experiments"
 for seed in $SEEDS; do
   for load in $LOADS; do
     for mode in $MODES; do
-      echo "[RUN] mode=$mode load=$load seed=$seed"
-      "$BIN" "$mode" "$load" "$THREADS" "$DURATION" "$MEM_NODE" "$CPU_NODE" "$seed" "$MEM_MB" "$TOUCHES" >> "$RAW"
+      echo "[RUN] mode=$mode load=$load seed=$seed queue_depth=$QUEUE_DEPTH"
+      "$BIN" "$mode" "$load" "$THREADS" "$DURATION" "$MEM_NODE" "$CPU_NODE" "$seed" "$MEM_MB" "$TOUCHES" "$QUEUE_DEPTH" >> "$RAW"
     done
   done
 done

@@ -6,13 +6,113 @@
 
 #include <inttypes.h>
 #include <pthread.h>
+#include <semaphore.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
+static void destroy_thread_stats(thread_stats_t *stats, int count) {
+    if (!stats) {
+        return;
+    }
+
+    for (int i = 0; i < count; i++) {
+        thread_stats_destroy(&stats[i]);
+    }
+}
+
+static int init_worker_args(worker_arg_t *args,
+                            thread_stats_t *stats,
+                            int nthreads,
+                            const config_t *cfg,
+                            memory_region_t *region) {
+    for (int i = 0; i < nthreads; i++) {
+        if (thread_stats_init(&stats[i], MAX_LAT_PER_THREAD) != 0) {
+            destroy_thread_stats(stats, i);
+            return -1;
+        }
+
+        args[i].cfg = cfg;
+        args[i].region = region;
+        args[i].rng = cfg->seed + (unsigned int)i * 10007U;
+        args[i].stats = &stats[i];
+    }
+
+    return 0;
+}
+
+static void join_workers(pthread_t *tids, int count) {
+    for (int i = 0; i < count; i++) {
+        pthread_join(tids[i], NULL);
+    }
+}
+
+static void set_stop_flag(int value) {
+    atomic_store_explicit(&stop_flag, value, memory_order_relaxed);
+}
+
+static int start_workers(pthread_t *tids,
+                         worker_arg_t *args,
+                         int nthreads,
+                         int *created_threads) {
+    *created_threads = 0;
+
+    for (int i = 0; i < nthreads; i++) {
+        int rc = pthread_create(&tids[i], NULL, worker_main, &args[i]);
+        if (rc != 0) {
+            fprintf(stderr, "Error: pthread_create failed: %s\n", strerror(rc));
+            set_stop_flag(1);
+            join_workers(tids, *created_threads);
+            *created_threads = 0;
+            return -1;
+        }
+
+        (*created_threads)++;
+    }
+
+    return 0;
+}
+
+static void print_summary_csv(const config_t *cfg, const summary_stats_t *sum) {
+    printf("track,load,seed,attempts,success,retry,backoff,"
+           "delay_p50,delay_p95,delay_p99,goodput,threads,seconds,"
+           "mem_node,cpu_node,mem_mb,touches_per_req,latency_samples,"
+           "backend,queue_depth\n");
+    printf("%s,%d,%u,%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%.2f,%d,%d,%d,%d,%d,%d,%" PRIu64 ",type3_numa_node%d,%d\n",
+           mode_name(cfg->mode),
+           cfg->load,
+           cfg->seed,
+           sum->attempts,
+           sum->success,
+           sum->retry,
+           sum->backoff,
+           sum->p50,
+           sum->p95,
+           sum->p99,
+           sum->goodput,
+           cfg->threads,
+           cfg->seconds,
+           cfg->mem_node,
+           cfg->cpu_node,
+           cfg->mem_mb,
+           cfg->touches_per_req,
+           sum->latency_count,
+           cfg->mem_node,
+           cfg->queue_depth);
+}
+
 int main(int argc, char **argv) {
     config_t cfg;
+    memory_region_t region = {0};
+    pthread_t *tids = NULL;
+    worker_arg_t *args = NULL;
+    thread_stats_t *thread_stats = NULL;
+    int created_threads = 0;
+    int switch_ready = 0;
+    int stats_ready = 0;
+    int status = 1;
 
     if (parse_config(argc, argv, &cfg) != 0) {
         return 1;
@@ -30,92 +130,69 @@ int main(int argc, char **argv) {
 
     print_config_stderr(&cfg);
 
-    memory_region_t region;
     if (memory_region_init(&region, cfg.mem_size, cfg.mem_node) != 0) {
-        return 1;
+        goto cleanup;
     }
 
-    pthread_t *tids = calloc((size_t)cfg.threads, sizeof(pthread_t));
-    worker_arg_t *args = calloc((size_t)cfg.threads, sizeof(worker_arg_t));
-    if (!tids || !args) {
+    if (sem_init(&cxl_switch_queue, 0, (unsigned int)cfg.queue_depth) != 0) {
+        perror("sem_init(cxl_switch_queue)");
+        goto cleanup;
+    }
+    switch_ready = 1;
+
+    tids = calloc((size_t)cfg.threads, sizeof(*tids));
+    args = calloc((size_t)cfg.threads, sizeof(*args));
+    thread_stats = calloc((size_t)cfg.threads, sizeof(*thread_stats));
+    if (!tids || !args || !thread_stats) {
         fprintf(stderr, "Error: calloc failed\n");
-        memory_region_destroy(&region);
-        free(tids);
-        free(args);
-        return 1;
+        goto cleanup;
     }
 
-    for (int i = 0; i < cfg.threads; i++) {
-        args[i].tid = i;
-        args[i].cfg = &cfg;
-        args[i].region = &region;
-        args[i].rng = cfg.seed + (unsigned int)i * 10007U;
-
-        if (thread_stats_init(&args[i].stats, MAX_LAT_PER_THREAD) != 0) {
-            fprintf(stderr, "Error: latency buffer allocation failed\n");
-            memory_region_destroy(&region);
-            free(tids);
-            free(args);
-            return 1;
-        }
+    if (init_worker_args(args, thread_stats, cfg.threads, &cfg, &region) != 0) {
+        fprintf(stderr, "Error: latency buffer allocation failed\n");
+        goto cleanup;
     }
+    stats_ready = 1;
 
     uint64_t start_ns = now_ns();
+    set_stop_flag(0);
 
-    for (int i = 0; i < cfg.threads; i++) {
-        int rc = pthread_create(&tids[i], NULL, worker_main, &args[i]);
-        if (rc != 0) {
-            fprintf(stderr, "Error: pthread_create failed: %s\n", strerror(rc));
-            stop_flag = 1;
-            return 1;
-        }
+    if (start_workers(tids, args, cfg.threads, &created_threads) != 0) {
+        goto cleanup;
     }
 
     sleep(cfg.seconds);
-    stop_flag = 1;
-
-    for (int i = 0; i < cfg.threads; i++) {
-        pthread_join(tids[i], NULL);
-    }
+    set_stop_flag(1);
+    join_workers(tids, created_threads);
+    created_threads = 0;
 
     uint64_t end_ns = now_ns();
     double elapsed_s = (double)(end_ns - start_ns) / 1000000000.0;
 
     summary_stats_t sum;
-    if (summarize_worker_stats(args, cfg.threads, elapsed_s, &sum) != 0) {
+    if (summarize_stats(thread_stats, cfg.threads, elapsed_s, &sum) != 0) {
         fprintf(stderr, "Error: summarize_stats failed\n");
-        return 1;
+        goto cleanup;
     }
 
-    printf("track,load,seed,attempts,success,retry,backoff,delay_p50,delay_p95,delay_p99,goodput,threads,seconds,mem_node,cpu_node,mem_mb,touches_per_req,latency_samples,backend\n");
-    printf("%s,%d,%u,%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%.2f,%d,%d,%d,%d,%d,%d,%" PRIu64 ",numa_node%d\n",
-           mode_name(cfg.mode),
-           cfg.load,
-           cfg.seed,
-           sum.attempts,
-           sum.success,
-           sum.retry,
-           sum.backoff,
-           sum.p50,
-           sum.p95,
-           sum.p99,
-           sum.goodput,
-           cfg.threads,
-           cfg.seconds,
-           cfg.mem_node,
-           cfg.cpu_node,
-           cfg.mem_mb,
-           cfg.touches_per_req,
-           sum.latency_count,
-           cfg.mem_node);
+    print_summary_csv(&cfg, &sum);
+    status = 0;
 
-    for (int i = 0; i < cfg.threads; i++) {
-        thread_stats_destroy(&args[i].stats);
+cleanup:
+    if (created_threads > 0) {
+        set_stop_flag(1);
+        join_workers(tids, created_threads);
     }
-
+    if (stats_ready) {
+        destroy_thread_stats(thread_stats, cfg.threads);
+    }
+    if (switch_ready) {
+        sem_destroy(&cxl_switch_queue);
+    }
     memory_region_destroy(&region);
-    free(tids);
+    free(thread_stats);
     free(args);
+    free(tids);
 
-    return 0;
+    return status;
 }

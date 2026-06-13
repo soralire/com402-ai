@@ -14,6 +14,7 @@ typedef struct {
     size_t mem_size;
     int mem_mb;
     int touches_per_req;
+    int queue_depth;
 } config_t;
 
 const char *mode_name(int mode);

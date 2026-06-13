@@ -5,7 +5,6 @@
 
 #include <errno.h>
 #include <numa.h>
-#include <pthread.h>
 #include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -124,7 +123,11 @@ void memory_region_request(memory_region_t *region, unsigned int *rng, int touch
         size_t line = (size_t)(xorshift32(rng) % lines);
         size_t off = line * CACHELINE_SIZE;
 
-        uint8_t v = region->base[off];
-        region->base[off] = (uint8_t)(v + 1);
+        /*
+         * This NUMA allocation is the remote memory backend for the simulated
+         * Type-3 Memory Device. With CXL Switch queue_depth > 1, requests can
+         * touch the backend concurrently, so use a relaxed atomic byte update.
+         */
+        __atomic_fetch_add((uint8_t *)&region->base[off], 1, __ATOMIC_RELAXED);
     }
 }

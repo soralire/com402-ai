@@ -1,113 +1,108 @@
-# CXL NUMA CSMA-like Request Injection Project
+# cxl_numa_csma
 
-## 1. Purpose
+`cxl_numa_csma` is a Linux NUMA-based CXL experiment simulator. It does not
+implement a hardware CXL protocol stack. The goal is to study contention-control
+policies over a CXL-like shared memory path.
 
-This project evaluates Random, Basic CSMA-like, and AIMD-based request injection policies on a QEMU-provided Linux NUMA topology.
-
-Compared with the earlier single-file simulation, this version uses the real Linux NUMA nodes visible in the guest:
-
-```bash
-numactl -H
-```
-
-The test memory buffer is allocated on `mem_node`, normally node1:
-
-```c
-numa_alloc_onnode(size, mem_node)
-```
-
-Worker threads are optionally pinned to `cpu_node`, normally node0.
-
-## 2. Build
-
-Install dependencies:
-
-```bash
-sudo apt update
-sudo apt install -y build-essential libnuma-dev numactl python3 python3-pandas python3-matplotlib
-```
-
-Build:
-
-```bash
-make
-```
-
-Smoke test:
-
-```bash
-make run-smoke
-```
-
-## 3. Run a single experiment
-
-Format:
-
-```bash
-./cxl_numa_csma <mode> <load> <threads> <seconds> [mem_node] [cpu_node] [seed] [mem_mb] [touches_per_req]
-```
-
-Examples:
-
-```bash
-./cxl_numa_csma 0 50 4 5 1 0 1 512 4096
-./cxl_numa_csma 1 50 4 5 1 0 1 512 4096
-./cxl_numa_csma 2 50 4 5 1 0 1 512 4096
-```
-
-Modes:
+## Experiment Model
 
 ```text
-0 = random
-1 = csma
-2 = aimd
+CPU workers -> CXL Switch queue -> Type-3 Memory Device -> NUMA remote memory backend
 ```
 
-## 4. Batch experiment
+- NUMA Node0 is the CPU execution node by default.
+- NUMA Node1 is the remote memory backend used as a simulated Type-3 Memory
+  Device by default.
+- `cxl_switch_queue` is a POSIX semaphore that models the shared bottleneck in a
+  CXL Switch or memory fabric.
+- `queue_depth` controls how many requests may concurrently enter the simulated
+  Type-3 memory backend.
 
-Run:
+## Build
 
 ```bash
-chmod +x scripts/run_batch.sh
-./scripts/run_batch.sh
+make clean && make
 ```
 
-Output:
+The project uses `pthread`, POSIX semaphores, Linux NUMA APIs, and C11 atomics.
+The Makefile builds with `-std=gnu11 -pthread -lnuma`.
+
+## Usage
 
 ```text
-results/results_numa_raw.csv
-results/results_numa_clean.csv
+./cxl_numa_csma <mode> <load> <threads> <seconds> [mem_node] [cpu_node] [seed] [mem_mb] [touches_per_req] [queue_depth]
 ```
 
-Plot:
+Required arguments:
+
+- `mode`: `0=random`, `1=csma`, `2=aimd`
+- `load`: request load, `1~100`
+- `threads`: worker thread count, `1~256`
+- `seconds`: runtime in seconds
+
+Optional arguments:
+
+- `mem_node`: NUMA node used as Type-3 memory backend, default `1`
+- `cpu_node`: NUMA node used as CPU execution node, default `0`
+- `seed`: random seed, default `1`
+- `mem_mb`: backend memory size in MB, default `512`
+- `touches_per_req`: cache-line touches per request, default `4096`
+- `queue_depth`: CXL Switch / Type-3 device queue depth, default `1`
+
+## Modes
+
+- `0` Random: blocking access to the CXL Switch queue.
+- `1` CSMA-like: non-blocking switch access; retry and random backoff on switch
+  contention.
+- `2` AIMD: adaptive request injection. `cwnd` controls per-worker injection
+  aggressiveness, while `queue_depth` controls global concurrent requests.
+
+`queue_depth=1` degenerates to the original single-channel model.
+`queue_depth=4/8/16/32` simulates a deeper CXL Switch or Type-3 Memory Device
+queue. With multiple workers and `queue_depth>1`, the system can have multiple
+outstanding memory requests.
+
+## Examples
 
 ```bash
-python3 scripts/plot_results.py
+./cxl_numa_csma 0 50 4 5 1 0 1 512 4096 1
+./cxl_numa_csma 1 50 4 5 1 0 1 512 4096 8
+./cxl_numa_csma 2 50 4 5 1 0 1 512 4096 8
 ```
 
-Figures:
+Each run prints one CSV header and one result row:
 
 ```text
-results/goodput_vs_load.png
-results/p99_vs_load.png
+track,load,seed,attempts,success,retry,backoff,delay_p50,delay_p95,delay_p99,goodput,threads,seconds,mem_node,cpu_node,mem_mb,touches_per_req,latency_samples,backend,queue_depth
 ```
 
-## 5. CSV fields
+The `backend` field uses `type3_numa_nodeX` to show which NUMA node backs the
+simulated Type-3 memory device.
 
-The output begins with assignment-compatible fields:
+## Batch Experiments
 
-```csv
-track,load,seed,attempts,success,retry,backoff,delay_p50,delay_p95,delay_p99
+```bash
+QUEUE_DEPTH=8 THREADS=4 DURATION=5 ./scripts/run_batch.sh
 ```
 
-Additional fields are also included:
+Useful sweep:
 
-```csv
-goodput,threads,seconds,mem_node,cpu_node,mem_mb,touches_per_req,latency_samples,backend
+```bash
+for q in 1 4 8 16 32; do
+  QUEUE_DEPTH="$q" OUT_DIR="results/q${q}" MODES="0 1 2" LOADS="10 30 50 70 90" ./scripts/run_batch.sh
+done
 ```
 
-## 6. Important interpretation
+`run_batch.sh` writes raw CSV to `results_numa_raw.csv` and a duplicate-header
+filtered CSV to `results_numa_clean.csv` under `OUT_DIR`.
 
-This version no longer uses a fixed artificial service time to imitate CXL latency. It allocates memory on a real NUMA node visible to the guest and performs actual memory touches.
+## Code Layout
 
-However, the Random/CSMA/AIMD contention control is still implemented in software. The measured latency is end-to-end request latency of this request generator, including lock contention, scheduling, backoff, and memory access.
+- `src/config.c`: command-line parsing and configuration validation.
+- `src/main.c`: experiment setup, worker lifecycle, cleanup, and CSV output.
+- `src/worker.c`: Random, CSMA-like, and AIMD request policies.
+- `src/stats.c`: per-thread latency collection and summary statistics.
+- `src/numa_backend.c`: NUMA allocation, CPU binding, and Type-3 backend memory
+  requests.
+- `scripts/run_batch.sh`: batch experiment runner with environment-variable
+  overrides.

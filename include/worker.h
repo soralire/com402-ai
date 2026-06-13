@@ -5,22 +5,20 @@
 #include "numa_backend.h"
 #include "stats.h"
 
-#include <pthread.h>
+#include <semaphore.h>
+#include <stdatomic.h>
 
 #define MAX_LAT_PER_THREAD 200000
 
 typedef struct worker_arg {
-    int tid;
     const config_t *cfg;
     memory_region_t *region;
     unsigned int rng;
-    thread_stats_t stats;
+    thread_stats_t *stats;
 } worker_arg_t;
 
-extern pthread_mutex_t channel_lock;
-extern volatile int stop_flag;
-
-int summarize_worker_stats(worker_arg_t *args, int nthreads, double elapsed_s, summary_stats_t *out);
+extern sem_t cxl_switch_queue;
+extern atomic_int stop_flag;
 
 void *worker_main(void *p);
 
