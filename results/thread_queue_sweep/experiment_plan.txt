@@ -17,9 +17,11 @@ Sweep configuration:
   seeds=1 2 3
   threads=8 16
   queue_depths=4 8
-  total_runs=180
+  device_workers=1 2
+  total_runs=360
 
 Interpretation:
   threads > queue_depth recreates CXL Switch contention after queue_depth was expanded.
   queue_depth controls global concurrent slots in the CXL Switch / Type-3 queue.
-  Compare retry rate, goodput, and p99 latency across modes at the same load.
+  device_workers controls Type-3 backend service parallelism.
+  Compare retry rate, goodput, p99 latency, and avg_cwnd across modes at the same load.
