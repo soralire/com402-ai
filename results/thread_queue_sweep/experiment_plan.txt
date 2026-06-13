@@ -5,7 +5,6 @@ Model:
 
 Fixed configuration:
   bin=./cxl_numa_csma
-  threads=4
   duration=5
   mem_node=1
   cpu_node=0
@@ -16,10 +15,11 @@ Sweep configuration:
   modes=0 1 2
   loads=10 30 50 70 90
   seeds=1 2 3
-  queue_depths=1 4 8 16 32
-  total_runs=225
+  threads=8 16
+  queue_depths=4 8
+  total_runs=180
 
 Interpretation:
-  queue_depth=1 is the original single-channel baseline.
-  queue_depth>1 models concurrent slots in the CXL Switch / Type-3 queue.
-  Compare goodput and p99 latency across modes at the same load and queue_depth.
+  threads > queue_depth recreates CXL Switch contention after queue_depth was expanded.
+  queue_depth controls global concurrent slots in the CXL Switch / Type-3 queue.
+  Compare retry rate, goodput, and p99 latency across modes at the same load.
