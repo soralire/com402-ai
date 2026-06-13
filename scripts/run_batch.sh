@@ -16,7 +16,7 @@ set -euo pipefail
 #   QUEUE_DEPTH=8 THREADS=16 DEVICE_WORKERS=1 LOADS="50 90" SEEDS="1" ./scripts/run_batch.sh
 
 BIN="${BIN:-./cxl_numa_csma}"
-OUT_DIR="${OUT_DIR:-results/thread_queue_sweep}"
+OUT_DIR="${OUT_DIR:-results}"
 RAW="${RAW:-$OUT_DIR/results_numa_raw.csv}"
 CLEAN="${CLEAN:-$OUT_DIR/results_numa_clean.csv}"
 PLAN="${PLAN:-$OUT_DIR/experiment_plan.txt}"
