@@ -1,0 +1,25 @@
+Experiment plan for cxl_numa_csma
+
+Model:
+  CPU workers -> CXL Switch queue -> Type-3 Memory Device -> NUMA remote memory backend
+
+Fixed configuration:
+  bin=./cxl_numa_csma
+  threads=4
+  duration=5
+  mem_node=1
+  cpu_node=0
+  mem_mb=512
+  touches_per_req=4096
+
+Sweep configuration:
+  modes=0 1 2
+  loads=10 30 50 70 90
+  seeds=1 2 3
+  queue_depths=1 4 8 16 32
+  total_runs=225
+
+Interpretation:
+  queue_depth=1 is the original single-channel baseline.
+  queue_depth>1 models concurrent slots in the CXL Switch / Type-3 queue.
+  Compare goodput and p99 latency across modes at the same load and queue_depth.
