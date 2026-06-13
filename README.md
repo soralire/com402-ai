@@ -81,20 +81,48 @@ simulated Type-3 memory device.
 
 ## Batch Experiments
 
+The default batch script runs a queue-depth sweep:
+
+```text
+modes:        0 1 2
+loads:        10 30 50 70 90
+seeds:        1 2 3
+queue_depths: 1 4 8 16 32
+threads:      4
+duration:     5 seconds
+```
+
+This gives a balanced experiment plan:
+
+- `queue_depth=1` is the baseline single-channel CXL Switch model.
+- `queue_depth=4/8/16/32` explores deeper CXL Switch / Type-3 device queues.
+- `load=10/30/50/70/90` covers light load through near-saturation load.
+- `mode=0/1/2` compares Random, CSMA-like, and AIMD under identical queue
+  settings.
+- `seed=1/2/3` gives repeated runs for basic variance checking.
+
+Run the full default sweep:
+
+```bash
+./scripts/run_batch.sh
+```
+
+Run one queue depth for a smaller experiment:
+
 ```bash
 QUEUE_DEPTH=8 THREADS=4 DURATION=5 ./scripts/run_batch.sh
 ```
 
-Useful sweep:
+Run a custom sweep:
 
 ```bash
-for q in 1 4 8 16 32; do
-  QUEUE_DEPTH="$q" OUT_DIR="results/q${q}" MODES="0 1 2" LOADS="10 30 50 70 90" ./scripts/run_batch.sh
-done
+QUEUE_DEPTHS="1 8 32" LOADS="30 70 90" SEEDS="1" ./scripts/run_batch.sh
 ```
 
 `run_batch.sh` writes raw CSV to `results_numa_raw.csv` and a duplicate-header
-filtered CSV to `results_numa_clean.csv` under `OUT_DIR`.
+filtered CSV to `results_numa_clean.csv` under `OUT_DIR`. It also writes
+`experiment_plan.txt`, which records the fixed parameters, sweep parameters, and
+how to interpret the queue-depth experiment.
 
 ## Code Layout
 
