@@ -2,31 +2,15 @@
 #include "utils.h"
 
 #include <errno.h>
-#include <semaphore.h>
+#include <stdlib.h>
 #include <unistd.h>
 
-sem_t cxl_switch_queue;
+#define AIMD_CWND_MAX 64
+
 atomic_int stop_flag = 0;
 
 static int stop_requested(void) {
     return atomic_load_explicit(&stop_flag, memory_order_relaxed);
-}
-
-static int switch_queue_wait(void) {
-    while (sem_wait(&cxl_switch_queue) != 0) {
-        if (errno != EINTR) {
-            return -1;
-        }
-    }
-    return 0;
-}
-
-static int switch_queue_try_acquire(void) {
-    return sem_trywait(&cxl_switch_queue) == 0;
-}
-
-static void switch_queue_release(void) {
-    sem_post(&cxl_switch_queue);
 }
 
 static void load_sleep(int load, unsigned int *rng) {
@@ -38,130 +22,198 @@ static void load_sleep(int load, unsigned int *rng) {
     }
 }
 
-static void run_random(worker_arg_t *arg) {
+static void random_backoff(unsigned int *rng, int *window_us, int max_us) {
+    usleep(xorshift32(rng) % (unsigned int)(*window_us));
+
+    if (*window_us < max_us) {
+        *window_us *= 2;
+        if (*window_us > max_us) {
+            *window_us = max_us;
+        }
+    }
+}
+
+static cxl_request_t *new_request(worker_arg_t *arg) {
     const config_t *cfg = arg->cfg;
+    unsigned int req_rng = xorshift32(&arg->rng);
+    return cxl_request_create(req_rng, cfg->touches_per_req);
+}
+
+static void finish_request(thread_stats_t *stats, cxl_request_t *req) {
+    uint64_t latency_ns = cxl_request_wait(req);
+    stats->success++;
+    thread_stats_record_latency(stats, latency_ns);
+    cxl_request_destroy(req);
+}
+
+static void run_random(worker_arg_t *arg) {
     thread_stats_t *stats = arg->stats;
 
     while (!stop_requested()) {
-        load_sleep(cfg->load, &arg->rng);
+        load_sleep(arg->cfg->load, &arg->rng);
 
-        stats->attempts++;
-
-        uint64_t t1 = now_ns();
-        /* Random: blocking access to the shared CXL Switch queue. */
-        if (switch_queue_wait() != 0) {
+        cxl_request_t *req = new_request(arg);
+        if (!req) {
             continue;
         }
-        memory_region_request(arg->region, &arg->rng, cfg->touches_per_req);
-        switch_queue_release();
-        uint64_t t2 = now_ns();
 
-        stats->success++;
-        thread_stats_record_latency(stats, t2 - t1);
+        stats->attempts++;
+        thread_stats_record_window(stats, 1, 1);
+
+        /*
+         * Random uses blocking credit acquisition. It keeps completion rate high
+         * but includes fabric credit stalls in request latency.
+         */
+        if (cxl_fabric_submit_blocking(arg->fabric, req) != 0) {
+            cxl_request_destroy(req);
+            continue;
+        }
+
+        finish_request(stats, req);
     }
 }
 
 static void run_csma(worker_arg_t *arg) {
-    const config_t *cfg = arg->cfg;
     thread_stats_t *stats = arg->stats;
     int backoff_window_us = 20;
     const int backoff_max_us = 2000;
 
     while (!stop_requested()) {
-        load_sleep(cfg->load, &arg->rng);
+        load_sleep(arg->cfg->load, &arg->rng);
+
+        cxl_request_t *req = new_request(arg);
+        if (!req) {
+            continue;
+        }
 
         stats->attempts++;
 
-        uint64_t t1 = now_ns();
-
-        /* CSMA-like: non-blocking CXL Switch access with random backoff. */
-        if (switch_queue_try_acquire()) {
-            memory_region_request(arg->region, &arg->rng, cfg->touches_per_req);
-            switch_queue_release();
-
-            uint64_t t2 = now_ns();
-
-            stats->success++;
-            thread_stats_record_latency(stats, t2 - t1);
+        /*
+         * CSMA-like is a non-blocking credit baseline: if the CXL Switch /
+         * Type-3 queue is full, it backs off instead of waiting in the queue.
+         */
+        if (cxl_fabric_submit_try(arg->fabric, req) == 0) {
+            thread_stats_record_window(stats, 1, 1);
+            finish_request(stats, req);
             backoff_window_us = 20;
         } else {
+            cxl_request_destroy(req);
             stats->retry++;
             stats->backoff++;
+            thread_stats_record_window(stats, 1, 0);
+            random_backoff(&arg->rng, &backoff_window_us, backoff_max_us);
+        }
+    }
+}
 
-            usleep(xorshift32(&arg->rng) % (unsigned int)backoff_window_us);
+static int reap_completed(cxl_request_t **inflight, int *count, thread_stats_t *stats) {
+    int completed = 0;
 
-            if (backoff_window_us < backoff_max_us) {
-                backoff_window_us *= 2;
-                if (backoff_window_us > backoff_max_us) {
-                    backoff_window_us = backoff_max_us;
-                }
+    for (int i = 0; i < *count;) {
+        if (!cxl_request_is_done(inflight[i])) {
+            i++;
+            continue;
+        }
+
+        finish_request(stats, inflight[i]);
+        completed++;
+
+        for (int j = i + 1; j < *count; j++) {
+            inflight[j - 1] = inflight[j];
+        }
+        (*count)--;
+    }
+
+    return completed;
+}
+
+static int wait_one_completion(cxl_request_t **inflight, int *count, thread_stats_t *stats) {
+    if (*count <= 0) {
+        return 0;
+    }
+
+    finish_request(stats, inflight[0]);
+
+    for (int i = 1; i < *count; i++) {
+        inflight[i - 1] = inflight[i];
+    }
+    (*count)--;
+    return 1;
+}
+
+static void update_aimd_on_completion(int completed, int *cwnd, int *acks_since_increase) {
+    for (int i = 0; i < completed; i++) {
+        (*acks_since_increase)++;
+        if (*acks_since_increase >= *cwnd) {
+            if (*cwnd < AIMD_CWND_MAX) {
+                (*cwnd)++;
             }
+            *acks_since_increase = 0;
         }
     }
 }
 
 static void run_aimd(worker_arg_t *arg) {
-    const config_t *cfg = arg->cfg;
     thread_stats_t *stats = arg->stats;
+    cxl_request_t *inflight[AIMD_CWND_MAX];
+    int inflight_count = 0;
     int cwnd = 1;
-    const int cwnd_max = 32;
+    int acks_since_increase = 0;
     int backoff_window_us = 20;
     const int backoff_max_us = 2000;
 
     while (!stop_requested()) {
-        load_sleep(cfg->load, &arg->rng);
+        load_sleep(arg->cfg->load, &arg->rng);
+
+        int completed = reap_completed(inflight, &inflight_count, stats);
+        update_aimd_on_completion(completed, &cwnd, &acks_since_increase);
 
         /*
-         * queue_depth controls global concurrent requests through the CXL Switch
-         * and Type-3 device queue. cwnd controls this worker's synchronous
-         * request-injection aggressiveness; multiple workers create real system-
-         * level outstanding requests when queue_depth > 1.
+         * AIMD now controls a real per-worker outstanding request window. The
+         * CXL fabric credits still enforce the global queue_depth, so cwnd can
+         * grow only when the shared Switch / Type-3 queue can absorb requests.
          */
-        int old_cwnd = cwnd;
-        int sent = 0;
-        int failed = 0;
-
-        for (int i = 0; i < old_cwnd && !stop_requested(); i++) {
-            stats->attempts++;
-            uint64_t t1 = now_ns();
-
-            if (switch_queue_try_acquire()) {
-                memory_region_request(arg->region, &arg->rng, cfg->touches_per_req);
-                switch_queue_release();
-
-                uint64_t t2 = now_ns();
-
-                stats->success++;
-                thread_stats_record_latency(stats, t2 - t1);
-                sent++;
-            } else {
-                stats->retry++;
-                stats->backoff++;
-                failed = 1;
-
-                cwnd /= 2;
-                if (cwnd < 1) {
-                    cwnd = 1;
-                }
-
-                usleep(xorshift32(&arg->rng) % (unsigned int)backoff_window_us);
-
-                if (backoff_window_us < backoff_max_us) {
-                    backoff_window_us *= 2;
-                    if (backoff_window_us > backoff_max_us) {
-                        backoff_window_us = backoff_max_us;
-                    }
-                }
-
+        while (inflight_count < cwnd && !stop_requested()) {
+            cxl_request_t *req = new_request(arg);
+            if (!req) {
                 break;
             }
+
+            stats->attempts++;
+            if (cxl_fabric_submit_try(arg->fabric, req) == 0) {
+                inflight[inflight_count++] = req;
+                thread_stats_record_window(stats, cwnd, inflight_count);
+                continue;
+            }
+
+            cxl_request_destroy(req);
+            stats->retry++;
+            stats->backoff++;
+            cwnd /= 2;
+            if (cwnd < 1) {
+                cwnd = 1;
+            }
+            acks_since_increase = 0;
+            thread_stats_record_window(stats, cwnd, inflight_count);
+            random_backoff(&arg->rng, &backoff_window_us, backoff_max_us);
+            break;
         }
 
-        if (!failed && sent == old_cwnd) {
-            if (cwnd < cwnd_max) {
-                cwnd++;
-            }
+        if (inflight_count >= cwnd) {
+            completed = wait_one_completion(inflight, &inflight_count, stats);
+            update_aimd_on_completion(completed, &cwnd, &acks_since_increase);
+        }
+
+        if (completed > 0) {
             backoff_window_us = 20;
+        }
+        thread_stats_record_window(stats, cwnd, inflight_count);
+    }
+
+    while (inflight_count > 0) {
+        int completed = reap_completed(inflight, &inflight_count, stats);
+        if (completed == 0) {
+            wait_one_completion(inflight, &inflight_count, stats);
         }
     }
 }

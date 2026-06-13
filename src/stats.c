@@ -24,14 +24,41 @@ void thread_stats_record_latency(thread_stats_t *s, uint64_t ns) {
     }
 }
 
+void thread_stats_record_window(thread_stats_t *s, int cwnd, int inflight) {
+    if (cwnd > 0) {
+        s->cwnd_sum += (uint64_t)cwnd;
+        s->cwnd_samples++;
+    }
+
+    if (inflight >= 0) {
+        s->inflight_sum += (uint64_t)inflight;
+        s->inflight_samples++;
+        if ((uint64_t)inflight > s->max_inflight) {
+            s->max_inflight = (uint64_t)inflight;
+        }
+    }
+}
+
 int summarize_stats(const thread_stats_t *stats, int nthreads, double elapsed_s, summary_stats_t *out) {
     memset(out, 0, sizeof(*out));
+
+    uint64_t cwnd_sum = 0;
+    uint64_t cwnd_samples = 0;
+    uint64_t inflight_sum = 0;
+    uint64_t inflight_samples = 0;
 
     for (int i = 0; i < nthreads; i++) {
         out->attempts += stats[i].attempts;
         out->success += stats[i].success;
         out->retry += stats[i].retry;
         out->backoff += stats[i].backoff;
+        cwnd_sum += stats[i].cwnd_sum;
+        cwnd_samples += stats[i].cwnd_samples;
+        inflight_sum += stats[i].inflight_sum;
+        inflight_samples += stats[i].inflight_samples;
+        if (stats[i].max_inflight > out->max_inflight) {
+            out->max_inflight = stats[i].max_inflight;
+        }
         out->latency_count += stats[i].latency_count;
     }
 
@@ -55,6 +82,8 @@ int summarize_stats(const thread_stats_t *stats, int nthreads, double elapsed_s,
         free(all);
     }
 
+    out->avg_cwnd = cwnd_samples > 0 ? (double)cwnd_sum / (double)cwnd_samples : 0.0;
+    out->avg_inflight = inflight_samples > 0 ? (double)inflight_sum / (double)inflight_samples : 0.0;
     out->goodput = elapsed_s > 0.0 ? (double)out->success / elapsed_s : 0.0;
     return 0;
 }

@@ -1,4 +1,5 @@
 #include "config.h"
+#include "cxl_fabric.h"
 #include "numa_backend.h"
 #include "stats.h"
 #include "utils.h"
@@ -6,7 +7,6 @@
 
 #include <inttypes.h>
 #include <pthread.h>
-#include <semaphore.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -27,7 +27,7 @@ static int init_worker_args(worker_arg_t *args,
                             thread_stats_t *stats,
                             int nthreads,
                             const config_t *cfg,
-                            memory_region_t *region) {
+                            cxl_fabric_t *fabric) {
     for (int i = 0; i < nthreads; i++) {
         if (thread_stats_init(&stats[i], MAX_LAT_PER_THREAD) != 0) {
             destroy_thread_stats(stats, i);
@@ -35,7 +35,7 @@ static int init_worker_args(worker_arg_t *args,
         }
 
         args[i].cfg = cfg;
-        args[i].region = region;
+        args[i].fabric = fabric;
         args[i].rng = cfg->seed + (unsigned int)i * 10007U;
         args[i].stats = &stats[i];
     }
@@ -79,8 +79,8 @@ static void print_summary_csv(const config_t *cfg, const summary_stats_t *sum) {
     printf("track,load,seed,attempts,success,retry,backoff,"
            "delay_p50,delay_p95,delay_p99,goodput,threads,seconds,"
            "mem_node,cpu_node,mem_mb,touches_per_req,latency_samples,"
-           "backend,queue_depth\n");
-    printf("%s,%d,%u,%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%.2f,%d,%d,%d,%d,%d,%d,%" PRIu64 ",type3_numa_node%d,%d\n",
+           "backend,queue_depth,device_workers,avg_cwnd,avg_inflight,max_inflight\n");
+    printf("%s,%d,%u,%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%.2f,%d,%d,%d,%d,%d,%d,%" PRIu64 ",type3_numa_node%d,%d,%d,%.2f,%.2f,%" PRIu64 "\n",
            mode_name(cfg->mode),
            cfg->load,
            cfg->seed,
@@ -100,17 +100,22 @@ static void print_summary_csv(const config_t *cfg, const summary_stats_t *sum) {
            cfg->touches_per_req,
            sum->latency_count,
            cfg->mem_node,
-           cfg->queue_depth);
+           cfg->queue_depth,
+           cfg->device_workers,
+           sum->avg_cwnd,
+           sum->avg_inflight,
+           sum->max_inflight);
 }
 
 int main(int argc, char **argv) {
     config_t cfg;
     memory_region_t region = {0};
+    cxl_fabric_t fabric = {0};
     pthread_t *tids = NULL;
     worker_arg_t *args = NULL;
     thread_stats_t *thread_stats = NULL;
     int created_threads = 0;
-    int switch_ready = 0;
+    int fabric_ready = 0;
     int stats_ready = 0;
     int status = 1;
 
@@ -134,11 +139,11 @@ int main(int argc, char **argv) {
         goto cleanup;
     }
 
-    if (sem_init(&cxl_switch_queue, 0, (unsigned int)cfg.queue_depth) != 0) {
-        perror("sem_init(cxl_switch_queue)");
+    if (cxl_fabric_init(&fabric, &region, cfg.queue_depth, cfg.device_workers) != 0) {
+        perror("cxl_fabric_init");
         goto cleanup;
     }
-    switch_ready = 1;
+    fabric_ready = 1;
 
     tids = calloc((size_t)cfg.threads, sizeof(*tids));
     args = calloc((size_t)cfg.threads, sizeof(*args));
@@ -148,7 +153,7 @@ int main(int argc, char **argv) {
         goto cleanup;
     }
 
-    if (init_worker_args(args, thread_stats, cfg.threads, &cfg, &region) != 0) {
+    if (init_worker_args(args, thread_stats, cfg.threads, &cfg, &fabric) != 0) {
         fprintf(stderr, "Error: latency buffer allocation failed\n");
         goto cleanup;
     }
@@ -186,8 +191,8 @@ cleanup:
     if (stats_ready) {
         destroy_thread_stats(thread_stats, cfg.threads);
     }
-    if (switch_ready) {
-        sem_destroy(&cxl_switch_queue);
+    if (fabric_ready) {
+        cxl_fabric_destroy(&fabric);
     }
     memory_region_destroy(&region);
     free(thread_stats);
