@@ -1,0 +1,27 @@
+Near vs remote memory experiment for cxl_numa_csma
+
+Purpose:
+  Compare NUMA-local backend memory and NUMA-remote backend memory under the same CXL-like fabric settings.
+  When numactl is available, every run is wrapped with --cpunodebind=0 so worker and device threads stay on the CPU node.
+
+Fixed configuration:
+  bin=/home/sjk/com402-ai/cxl_numa_csma
+  cpu_node=0
+  threads=8
+  duration=10
+  seed=1
+  mem_mb=512
+  touches_per_req=4096
+  queue_depth=4
+  device_workers=1
+
+Sweep configuration:
+  mem_nodes=0 1
+  modes=0 1 2
+  loads=10 30 50 70 90
+  total_runs=30
+
+Interpretation:
+  mem_node=cpu_node is the local-memory baseline.
+  mem_node!=cpu_node is the remote-memory backend, used here as the CXL-like Type-3 memory path.
+  Compare p50/p95/p99 latency, goodput, retry rate, and backoff rate at the same mode/load.

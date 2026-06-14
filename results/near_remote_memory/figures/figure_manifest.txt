@@ -1,0 +1,16 @@
+Near vs remote memory figures
+Input CSV: /home/sjk/com402-ai/results/near_remote_memory/near_remote_clean.csv
+Rows: 30
+
+paired_near_remote_summary.csv
+near_remote_goodput.png
+near_remote_p50_latency.png
+near_remote_p95_latency.png
+near_remote_p99_latency.png
+near_remote_retry_rate.png
+near_remote_backoff_rate.png
+near_remote_tail_amplification.png
+ratio_p99_remote_over_local.png
+ratio_goodput_remote_over_local.png
+ratio_retry_remote_over_local.png
+summary_remote_over_local_ratios.png
