@@ -90,9 +90,24 @@ track,load,seed,attempts,success,retry,backoff,delay_p50,delay_p95,delay_p99,goo
 The `backend` field uses `type3_numa_nodeX` to show which NUMA node backs the
 simulated Type-3 memory device.
 
-## Batch Experiments
+## Experiments
 
-The default batch script focuses on AIMD-relevant oversubscription:
+Experiment scripts are organized by experiment under `experiments/`, while all
+outputs are grouped under `results/` by experiment name.
+
+```text
+experiments/
+  thread_queue_sweep/     original thread/queue/device-worker sweep
+  near_remote_memory/     local-vs-remote NUMA memory comparison
+
+results/
+  thread_queue_sweep/     outputs from the original sweep
+  near_remote_memory/     outputs from the local-vs-remote comparison
+```
+
+### Thread/Queue Sweep
+
+The original sweep focuses on AIMD-relevant oversubscription:
 
 ```text
 modes:          0 1 2
@@ -111,25 +126,62 @@ separates switch-credit contention from backend service parallelism.
 Run the default sweep:
 
 ```bash
-./scripts/run_batch.sh
+./experiments/thread_queue_sweep/run_thread_queue_sweep.sh
 ```
 
 Run a smaller custom sweep:
 
 ```bash
-QUEUE_DEPTH=8 THREADS=16 DEVICE_WORKERS=1 LOADS="50 90" SEEDS="1" ./scripts/run_batch.sh
+QUEUE_DEPTH=8 THREADS=16 DEVICE_WORKERS=1 LOADS="50 90" SEEDS="1" ./experiments/thread_queue_sweep/run_thread_queue_sweep.sh
 ```
 
 Run the full default shape explicitly:
 
 ```bash
-QUEUE_DEPTHS="4 8" THREADS_LIST="8 16" DEVICE_WORKERS_LIST="1 2" ./scripts/run_batch.sh
+QUEUE_DEPTHS="4 8" THREADS_LIST="8 16" DEVICE_WORKERS_LIST="1 2" ./experiments/thread_queue_sweep/run_thread_queue_sweep.sh
 ```
 
-`run_batch.sh` writes raw CSV to `results_numa_raw.csv` and a duplicate-header
-filtered CSV to `results_numa_clean.csv` under `OUT_DIR`. It also writes
-`experiment_plan.txt`, which records the fixed parameters, sweep parameters, and
-how to interpret the thread/queue/device-worker experiment.
+The script writes `thread_queue_raw.csv`, `thread_queue_clean.csv`, and
+`experiment_plan.txt` to `results/thread_queue_sweep/`.
+
+Generate figures:
+
+```bash
+python3 experiments/thread_queue_sweep/plot_thread_queue_sweep.py
+```
+
+### Near/Remote Memory Comparison
+
+The near/remote comparison keeps the experiment small and changes only the
+backend memory node:
+
+```text
+cpu_node:        0
+mem_nodes:       0 1
+threads:         8
+duration:        10 seconds
+seed:            1
+touches_per_req: 4096
+loads:           10 30 50 70 90
+modes:           0 1 2
+queue_depth:     4
+device_workers:  1
+```
+
+Run it:
+
+```bash
+./experiments/near_remote_memory/run_near_remote.sh
+```
+
+The script writes `near_remote_raw.csv`, `near_remote_clean.csv`, and
+`experiment_plan.txt` to `results/near_remote_memory/`.
+
+Generate figures:
+
+```bash
+python3 experiments/near_remote_memory/plot_near_remote.py
+```
 
 ## Code Layout
 
@@ -141,5 +193,8 @@ how to interpret the thread/queue/device-worker experiment.
 - `src/stats.c`: per-thread latency, window, inflight, and summary statistics.
 - `src/numa_backend.c`: NUMA allocation, CPU binding, and Type-3 backend memory
   requests.
-- `scripts/run_batch.sh`: batch experiment runner with environment-variable
-  overrides.
+- `experiments/thread_queue_sweep/`: original thread/queue sweep runner and
+  plotting script.
+- `experiments/near_remote_memory/`: local-vs-remote memory comparison runner
+  and plotting script.
+- `scripts/`: compatibility wrappers for older command paths.

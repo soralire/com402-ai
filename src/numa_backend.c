@@ -27,6 +27,7 @@ int bind_current_thread_to_node(int node) {
         return -1;
     }
 
+    /* 将当前线程绑定到指定 NUMA 节点上的 CPU，保证近端/远端实验只改变内存节点。 */
     struct bitmask *cpus = numa_allocate_cpumask();
     if (!cpus) {
         perror("numa_allocate_cpumask");
@@ -79,6 +80,7 @@ void *alloc_memory_on_node(size_t size, int mem_node) {
 
     numa_set_strict(1);
 
+    /* 后端内存显式分配到 mem_node，用来模拟 Type-3 设备挂载在某个 NUMA 节点。 */
     void *p = numa_alloc_onnode(size, mem_node);
     if (!p) {
         fprintf(stderr, "Error: numa_alloc_onnode(size=%zu,node=%d) failed\n", size, mem_node);
@@ -119,6 +121,7 @@ void memory_region_request(memory_region_t *region, unsigned int *rng, int touch
     size_t lines = region->size / CACHELINE_SIZE;
     if (lines == 0) return;
 
+    /* 每个请求随机触碰多个 cache line，touches_per_req 越大，请求越偏向内存带宽/容量压力。 */
     for (int i = 0; i < touches_per_req; i++) {
         size_t line = (size_t)(xorshift32(rng) % lines);
         size_t off = line * CACHELINE_SIZE;

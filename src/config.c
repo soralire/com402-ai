@@ -40,6 +40,7 @@ int parse_config(int argc, char **argv, config_t *cfg) {
         return -1;
     }
 
+    /* 命令行参数从左到右对应实验变量；未提供的可选参数使用默认值。 */
     cfg->mode = atoi(argv[1]);
     cfg->load = atoi(argv[2]);
     cfg->threads = atoi(argv[3]);

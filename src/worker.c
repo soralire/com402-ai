@@ -14,6 +14,7 @@ static int stop_requested(void) {
 }
 
 static void load_sleep(int load, unsigned int *rng) {
+    /* load 越低，worker 注入请求前的随机空闲越长；load=100 基本不主动降速。 */
     if (load < 100) {
         int idle_us = (100 - load) * 20;
         if (idle_us > 0) {
@@ -41,6 +42,7 @@ static cxl_request_t *new_request(worker_arg_t *arg) {
 
 static void finish_request(thread_stats_t *stats, cxl_request_t *req) {
     uint64_t latency_ns = cxl_request_wait(req);
+    /* 只有真正完成的请求才计入 success 和延迟样本。 */
     stats->success++;
     thread_stats_record_latency(stats, latency_ns);
     cxl_request_destroy(req);
@@ -60,6 +62,7 @@ static void run_random(worker_arg_t *arg) {
         stats->attempts++;
         thread_stats_record_window(stats, 1, 1);
 
+        /* Random 基线使用阻塞式 credit 获取，适合作为不丢请求的端到端延迟参考。 */
         /*
          * Random uses blocking credit acquisition. It keeps completion rate high
          * but includes fabric credit stalls in request latency.
@@ -88,6 +91,7 @@ static void run_csma(worker_arg_t *arg) {
 
         stats->attempts++;
 
+        /* CSMA-like 在队列满时不等待，而是退避后重试，用 retry/backoff 反映拥塞。 */
         /*
          * CSMA-like is a non-blocking credit baseline: if the CXL Switch /
          * Type-3 queue is full, it backs off instead of waiting in the queue.
@@ -168,6 +172,7 @@ static void run_aimd(worker_arg_t *arg) {
         int completed = reap_completed(inflight, &inflight_count, stats);
         update_aimd_on_completion(completed, &cwnd, &acks_since_increase);
 
+        /* AIMD 根据完成事件增大窗口，遇到 fabric credit 不足时减半，用来观察自适应注入能力。 */
         /*
          * AIMD now controls a real per-worker outstanding request window. The
          * CXL fabric credits still enforce the global queue_depth, so cwnd can
@@ -221,6 +226,7 @@ static void run_aimd(worker_arg_t *arg) {
 void *worker_main(void *p) {
     worker_arg_t *arg = (worker_arg_t *)p;
 
+    /* 每个 worker 绑定到 cpu_node，保证对比 mem_node=0/1 时 CPU 位置不变。 */
     bind_current_thread_to_node(arg->cfg->cpu_node);
 
     if (arg->cfg->mode == 0) {

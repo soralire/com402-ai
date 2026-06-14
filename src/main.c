@@ -28,6 +28,7 @@ static int init_worker_args(worker_arg_t *args,
                             int nthreads,
                             const config_t *cfg,
                             cxl_fabric_t *fabric) {
+    /* 为每个 worker 准备独立随机种子和统计缓冲，避免线程之间共享统计结构。 */
     for (int i = 0; i < nthreads; i++) {
         if (thread_stats_init(&stats[i], MAX_LAT_PER_THREAD) != 0) {
             destroy_thread_stats(stats, i);
@@ -76,6 +77,7 @@ static int start_workers(pthread_t *tids,
 }
 
 static void print_summary_csv(const config_t *cfg, const summary_stats_t *sum) {
+    /* 每次运行输出一行 CSV，批量脚本会负责去掉重复 header。 */
     printf("track,load,seed,attempts,success,retry,backoff,"
            "delay_p50,delay_p95,delay_p99,goodput,threads,seconds,"
            "mem_node,cpu_node,mem_mb,touches_per_req,latency_samples,"
@@ -135,6 +137,7 @@ int main(int argc, char **argv) {
 
     print_config_stderr(&cfg);
 
+    /* 先分配后端内存并初始化 fabric，再启动 CPU worker 进行请求注入。 */
     if (memory_region_init(&region, cfg.mem_size, cfg.mem_node) != 0) {
         goto cleanup;
     }
@@ -171,6 +174,7 @@ int main(int argc, char **argv) {
     join_workers(tids, created_threads);
     created_threads = 0;
 
+    /* 汇总所有线程的成功请求、延迟分位数和窗口统计。 */
     uint64_t end_ns = now_ns();
     double elapsed_s = (double)(end_ns - start_ns) / 1000000000.0;
 

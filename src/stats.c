@@ -19,12 +19,14 @@ void thread_stats_destroy(thread_stats_t *s) {
 }
 
 void thread_stats_record_latency(thread_stats_t *s, uint64_t ns) {
+    /* 延迟样本数量有上限，避免长时间实验占用过多内存。 */
     if (s->latency_count < s->latency_capacity) {
         s->latencies[s->latency_count++] = ns;
     }
 }
 
 void thread_stats_record_window(thread_stats_t *s, int cwnd, int inflight) {
+    /* 窗口和在途请求统计用于分析 AIMD 是否受到 fabric credit 限制。 */
     if (cwnd > 0) {
         s->cwnd_sum += (uint64_t)cwnd;
         s->cwnd_samples++;
@@ -42,6 +44,7 @@ void thread_stats_record_window(thread_stats_t *s, int cwnd, int inflight) {
 int summarize_stats(const thread_stats_t *stats, int nthreads, double elapsed_s, summary_stats_t *out) {
     memset(out, 0, sizeof(*out));
 
+    /* 先合并线程级计数，再把全部延迟样本排序计算 p50/p95/p99。 */
     uint64_t cwnd_sum = 0;
     uint64_t cwnd_samples = 0;
     uint64_t inflight_sum = 0;

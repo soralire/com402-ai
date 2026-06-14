@@ -1,24 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Batch experiment script for cxl_numa_csma.
-#
-# Experimental design:
-#   1. queue_depth=4/8 keeps the CXL Switch / Type-3 queue moderately loaded.
-#   2. threads=8/16 intentionally exceeds queue_depth to recreate contention.
-#   3. device_workers=1/2 models Type-3 device service parallelism.
-#   4. load=10/30/50/70/90 covers light, medium, high, and near-saturation load.
-#   5. modes=0/1/2 compares Random, CSMA-like, and AIMD under the same fabric.
-#   6. seeds=1/2/3 provide repeated runs for basic variance checking.
-#
-# Common overrides:
-#   QUEUE_DEPTHS="4 8" THREADS_LIST="8 16" DEVICE_WORKERS_LIST="1 2" DURATION=5 ./scripts/run_batch.sh
-#   QUEUE_DEPTH=8 THREADS=16 DEVICE_WORKERS=1 LOADS="50 90" SEEDS="1" ./scripts/run_batch.sh
+# 原本的 thread/queue/device-worker sweep 实验。
+# 输出统一写入项目根目录 results/thread_queue_sweep/。
 
-BIN="${BIN:-./cxl_numa_csma}"
-OUT_DIR="${OUT_DIR:-results/thread_queue_sweep}"
-RAW="${RAW:-$OUT_DIR/results_numa_raw.csv}"
-CLEAN="${CLEAN:-$OUT_DIR/results_numa_clean.csv}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+BIN="${BIN:-$PROJECT_DIR/cxl_numa_csma}"
+OUT_DIR="${OUT_DIR:-$PROJECT_DIR/results/thread_queue_sweep}"
+RAW="${RAW:-$OUT_DIR/thread_queue_raw.csv}"
+CLEAN="${CLEAN:-$OUT_DIR/thread_queue_clean.csv}"
 PLAN="${PLAN:-$OUT_DIR/experiment_plan.txt}"
 
 THREADS_LIST="${THREADS_LIST:-${THREADS:-8 16}}"
@@ -55,7 +47,7 @@ DEVICE_WORKER_COUNT=$(count_words "$DEVICE_WORKERS_LIST")
 TOTAL_RUNS=$((MODE_COUNT * LOAD_COUNT * SEED_COUNT * QUEUE_DEPTH_COUNT * THREAD_COUNT * DEVICE_WORKER_COUNT))
 
 {
-  echo "Experiment plan for cxl_numa_csma"
+  echo "Thread/queue sweep experiment for cxl_numa_csma"
   echo
   echo "Model:"
   echo "  CPU workers -> CXL Switch queue -> Type-3 Memory Device -> NUMA remote memory backend"
@@ -84,8 +76,12 @@ TOTAL_RUNS=$((MODE_COUNT * LOAD_COUNT * SEED_COUNT * QUEUE_DEPTH_COUNT * THREAD_
   echo "  Compare retry rate, goodput, p99 latency, and avg_cwnd across modes at the same load."
 } | tee "$PLAN"
 
-echo "[INFO] Checking NUMA topology"
-numactl -H
+if command -v numactl >/dev/null 2>&1; then
+  echo "[INFO] Checking NUMA topology"
+  numactl -H
+else
+  echo "[WARN] numactl not found; continuing without topology print"
+fi
 
 echo "[INFO] Running $TOTAL_RUNS experiments"
 run_id=0
@@ -121,3 +117,6 @@ if [[ -n "$BAD" ]]; then
 else
   echo "[OK] Percentile order is valid"
 fi
+
+echo "[INFO] Plot command:"
+echo "  python3 \"$SCRIPT_DIR/plot_thread_queue_sweep.py\" --csv \"$CLEAN\" --out-dir \"$OUT_DIR/figures\""

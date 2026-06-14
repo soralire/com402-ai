@@ -17,6 +17,7 @@ static int wait_for_credit(sem_t *credits) {
 static void enqueue_request(cxl_fabric_t *fabric, cxl_request_t *req) {
     req->next = NULL;
 
+    /* 提交到模拟 CXL Switch / Type-3 设备队列，真正的内存访问由设备服务线程执行。 */
     pthread_mutex_lock(&fabric->queue_lock);
     if (fabric->tail) {
         fabric->tail->next = req;
@@ -45,6 +46,7 @@ static cxl_request_t *dequeue_request(cxl_fabric_t *fabric) {
 static void complete_request(cxl_fabric_t *fabric, cxl_request_t *req) {
     uint64_t complete_ns = now_ns();
 
+    /* 完成时间用于端到端延迟统计；释放 credit 表示 fabric 中又空出一个并发槽。 */
     pthread_mutex_lock(&req->lock);
     req->complete_ns = complete_ns;
     req->done = 1;
@@ -95,6 +97,7 @@ int cxl_fabric_init(cxl_fabric_t *fabric,
     fabric->device_workers = device_workers;
     atomic_init(&fabric->stop, 0);
 
+    /* queue_depth 是全局 fabric credit 数，限制同一时间在途的请求数量。 */
     if (sem_init(&fabric->credits, 0, (unsigned int)queue_depth) != 0) {
         return -1;
     }
@@ -194,6 +197,7 @@ void cxl_request_destroy(cxl_request_t *req) {
 }
 
 int cxl_fabric_submit_blocking(cxl_fabric_t *fabric, cxl_request_t *req) {
+    /* blocking 模式会等到 credit 可用，因此等待时间会计入请求端到端延迟。 */
     if (wait_for_credit(&fabric->credits) != 0) {
         return -1;
     }
@@ -203,6 +207,7 @@ int cxl_fabric_submit_blocking(cxl_fabric_t *fabric, cxl_request_t *req) {
 }
 
 int cxl_fabric_submit_try(cxl_fabric_t *fabric, cxl_request_t *req) {
+    /* try 模式用于 CSMA/AIMD：credit 不可用时立即失败，由 worker 统计 retry/backoff。 */
     if (sem_trywait(&fabric->credits) != 0) {
         return -1;
     }
