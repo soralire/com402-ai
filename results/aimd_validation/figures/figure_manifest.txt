@@ -1,0 +1,14 @@
+Worker/credit oversubscription figures
+Input CSV: /home/sjk/com402-ai/results/aimd_validation/thread_queue_clean.csv
+Filter: load=100, queue_depth=4, device_workers=1
+Rows used: 18
+
+Interpretation: retry-based policy p99 includes admission waiting and backoff; acceptance is admission-attempt success rate.
+
+oversubscription_vs_goodput.png
+oversubscription_vs_logical_request_p99.png
+oversubscription_vs_acceptance.png
+oversubscription_vs_rejections_per_completion.png
+goodput_vs_logical_request_p99_tradeoff.png
+summary_by_oversubscription.csv
+aimd_global_window.png
