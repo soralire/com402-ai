@@ -169,6 +169,12 @@ Generate figures:
 python3 experiments/thread_queue_sweep/plot_thread_queue_sweep.py
 ```
 
+Run a shorter AIMD-only regression with:
+
+```bash
+bash experiments/thread_queue_sweep/run_aimd_validation.sh
+```
+
 ### Near/Remote Memory Comparison
 
 The near/remote comparison keeps the experiment small and changes only the

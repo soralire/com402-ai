@@ -14,9 +14,11 @@
 
 typedef struct {
     pthread_mutex_t lock;
+    pthread_cond_t slot_available;
     int cwnd;
     int inflight;
     int reservations;
+    int waiting_workers;
     int acks_since_increase;
     int max_cwnd;
     uint64_t max_inflight;
@@ -50,6 +52,7 @@ int aimd_controller_init(aimd_controller_t *controller,
                          int initial_cwnd,
                          int max_cwnd);
 void aimd_controller_destroy(aimd_controller_t *controller);
+void aimd_controller_wake_all(aimd_controller_t *controller);
 void aimd_controller_get_metrics(aimd_controller_t *controller,
                                  aimd_controller_metrics_t *metrics);
 

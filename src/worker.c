@@ -7,7 +7,7 @@
 
 #define BACKOFF_MIN_US 200
 #define BACKOFF_MAX_US 8000
-#define AIMD_SLOT_WAIT_US 50
+#define REQUEST_ALLOC_RETRY_US 50
 
 atomic_int stop_flag = 0;
 
@@ -81,6 +81,10 @@ int aimd_controller_init(aimd_controller_t *controller,
     if (pthread_mutex_init(&controller->lock, NULL) != 0) {
         return -1;
     }
+    if (pthread_cond_init(&controller->slot_available, NULL) != 0) {
+        pthread_mutex_destroy(&controller->lock);
+        return -1;
+    }
 
     controller->cwnd = initial_cwnd;
     controller->max_cwnd = max_cwnd;
@@ -90,8 +94,19 @@ int aimd_controller_init(aimd_controller_t *controller,
 
 void aimd_controller_destroy(aimd_controller_t *controller) {
     if (controller) {
+        pthread_cond_destroy(&controller->slot_available);
         pthread_mutex_destroy(&controller->lock);
     }
+}
+
+void aimd_controller_wake_all(aimd_controller_t *controller) {
+    if (!controller) {
+        return;
+    }
+
+    pthread_mutex_lock(&controller->lock);
+    pthread_cond_broadcast(&controller->slot_available);
+    pthread_mutex_unlock(&controller->lock);
 }
 
 void aimd_controller_get_metrics(aimd_controller_t *controller,
@@ -137,12 +152,21 @@ static void aimd_on_device_completion_locked(void *ctx) {
         }
         controller->acks_since_increase = 0;
     }
+
+    int available =
+        controller->cwnd - controller->inflight - controller->reservations;
+    int wake_count = available < controller->waiting_workers
+                         ? available
+                         : controller->waiting_workers;
+    for (int i = 0; i < wake_count; i++) {
+        pthread_cond_signal(&controller->slot_available);
+    }
 }
 
 /*
  * Return values:
  *   1: submitted to the fabric;
- *   0: paced by the global cwnd, so no fabric admission was attempted;
+ *   0: experiment stop was requested before fabric admission;
  *  -1: fabric admission failed and the same logical request must be retried.
  */
 static int aimd_try_submit(aimd_controller_t *controller,
@@ -155,8 +179,16 @@ static int aimd_try_submit(aimd_controller_t *controller,
     pthread_mutex_lock(&controller->lock);
     controller_update_time_locked(controller, now_ns());
 
-    if (controller->inflight + controller->reservations >=
-        controller->cwnd) {
+    while (!stop_requested() &&
+           controller->inflight + controller->reservations >=
+               controller->cwnd) {
+        controller->waiting_workers++;
+        pthread_cond_wait(&controller->slot_available, &controller->lock);
+        controller->waiting_workers--;
+        controller_update_time_locked(controller, now_ns());
+    }
+
+    if (stop_requested()) {
         goto out;
     }
 
@@ -168,6 +200,16 @@ static int aimd_try_submit(aimd_controller_t *controller,
             controller->max_inflight = (uint64_t)controller->inflight;
         }
         result = 1;
+
+        int available =
+            controller->cwnd - controller->inflight -
+            controller->reservations;
+        int wake_count = available < controller->waiting_workers
+                             ? available
+                             : controller->waiting_workers;
+        for (int i = 0; i < wake_count; i++) {
+            pthread_cond_signal(&controller->slot_available);
+        }
         goto out;
     }
 
@@ -311,7 +353,7 @@ static void run_aimd(worker_arg_t *arg) {
             load_sleep(arg->cfg->load, &arg->rng);
             pending = new_request(arg);
             if (!pending) {
-                usleep(AIMD_SLOT_WAIT_US);
+                usleep(REQUEST_ALLOC_RETRY_US);
                 continue;
             }
             pending->completion_lock = &controller->lock;
@@ -327,17 +369,7 @@ static void run_aimd(worker_arg_t *arg) {
                                             &cwnd,
                                             &global_inflight);
         if (submit_result == 0) {
-            /*
-             * Do not count controller pacing as a fabric retry. If this worker
-             * owns completed requests, reap one so the global window can make
-             * progress; otherwise briefly yield to workers holding requests.
-             */
-            if (inflight) {
-                wait_one_completion(&inflight, stats);
-                relax_backoff(&backoff_window_us, BACKOFF_MIN_US);
-            } else {
-                usleep(AIMD_SLOT_WAIT_US);
-            }
+            /* Stop wake-up: leave the pending request for normal cleanup. */
             continue;
         }
 

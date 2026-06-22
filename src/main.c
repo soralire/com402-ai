@@ -67,6 +67,9 @@ static int start_workers(pthread_t *tids,
         if (rc != 0) {
             fprintf(stderr, "Error: pthread_create failed: %s\n", strerror(rc));
             set_stop_flag(1);
+            if (args[0].aimd) {
+                aimd_controller_wake_all(args[0].aimd);
+            }
             join_workers(tids, *created_threads);
             *created_threads = 0;
             return -1;
@@ -201,6 +204,9 @@ int main(int argc, char **argv) {
 
     sleep(cfg.seconds);
     set_stop_flag(1);
+    if (aimd_ready) {
+        aimd_controller_wake_all(&aimd_controller);
+    }
     join_workers(tids, created_threads);
     created_threads = 0;
 
@@ -237,6 +243,9 @@ int main(int argc, char **argv) {
 cleanup:
     if (created_threads > 0) {
         set_stop_flag(1);
+        if (aimd_ready) {
+            aimd_controller_wake_all(&aimd_controller);
+        }
         join_workers(tids, created_threads);
     }
     if (stats_ready) {

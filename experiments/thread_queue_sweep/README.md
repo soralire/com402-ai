@@ -48,6 +48,22 @@ make clean && make
 python3 experiments/thread_queue_sweep/plot_thread_queue_sweep.py
 ```
 
+For a fast AIMD-only validation run:
+
+```bash
+make clean && make
+bash experiments/thread_queue_sweep/run_aimd_validation.sh
+```
+
+The validation wrapper runs only mode `2`, using three seeds and ten seconds
+per point by default. It writes results to `results/aimd_validation/` and
+generates the figures automatically. Override the quick defaults when needed:
+
+```bash
+DURATION=15 SEEDS="1 2 3 4 5" \
+bash experiments/thread_queue_sweep/run_aimd_validation.sh
+```
+
 Outputs are written to `results/thread_queue_sweep/`.
 
 The plotting script generates:
