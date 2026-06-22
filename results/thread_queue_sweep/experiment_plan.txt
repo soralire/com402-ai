@@ -1,27 +1,30 @@
-Experiment plan for cxl_numa_csma
+Worker/credit oversubscription experiment for cxl_numa_csma
 
 Model:
   CPU workers -> CXL Switch queue -> Type-3 Memory Device -> NUMA remote memory backend
 
-Fixed configuration:
-  bin=./cxl_numa_csma
-  duration=5
+Fixed/default configuration:
+  bin=/home/sjk/com402-ai/cxl_numa_csma
+  duration=15
   mem_node=1
   cpu_node=0
   mem_mb=512
   touches_per_req=4096
 
 Sweep configuration:
-  modes=0 1 2
-  loads=10 30 50 70 90
-  seeds=1 2 3
-  threads=8 16
-  queue_depths=4 8
-  device_workers=1 2
-  total_runs=360
+  modes=0
+  loads=100
+  seeds=1 2 3 4 5
+  threads=1 2 4 8 16 32
+  queue_depths=4
+  device_workers=1
+  total_runs=30
 
 Interpretation:
-  threads > queue_depth recreates CXL Switch contention after queue_depth was expanded.
-  queue_depth controls global concurrent slots in the CXL Switch / Type-3 queue.
-  device_workers controls Type-3 backend service parallelism.
-  Compare retry rate, goodput, p99 latency, and avg_cwnd across modes at the same load.
+  oversubscription = threads / queue_depth.
+  oversubscription <= 1 is the low-contention region.
+  oversubscription > 1 creates competition for fixed fabric credits.
+  Random is interpreted as the blocking/no-rejection baseline.
+  CSMA/AIMD retry counters are interpreted as admission rejections.
+  Their p99 values describe admitted and completed requests only.
+  Compare goodput, admitted-request p99, acceptance rate, and rejections per completion.

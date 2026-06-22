@@ -1,0 +1,7 @@
+track,threads,queue_depth,oversubscription,measured_completion_rate_mean,measured_completion_rate_std,measured_completion_rate_count,delay_p99_ms_mean,delay_p99_ms_std,delay_p99_ms_count,acceptance_rate_pct_mean,acceptance_rate_pct_std,acceptance_rate_pct_count,admission_rejections_per_completion_mean,admission_rejections_per_completion_std,admission_rejections_per_completion_count,avg_cwnd_mean,avg_cwnd_std,avg_cwnd_count,avg_inflight_mean,avg_inflight_std,avg_inflight_count
+random,1,4,0.25,707.3773680728057,108.63152470933711,5,2.0933218,0.3723973154121819,5,100.0,0.0,5,0.0,0.0,5,1.0,0.0,5,1.0,0.0,5
+random,2,4,0.5,957.6711006271053,57.56681491657533,5,2.8542099999999997,0.26639720733990424,5,100.0,0.0,5,0.0,0.0,5,1.0,0.0,5,1.0,0.0,5
+random,4,4,1.0,737.3340110076704,68.71756059125887,5,7.831354999999999,1.5054052211834854,5,100.0,0.0,5,0.0,0.0,5,1.0,0.0,5,1.0,0.0,5
+random,8,4,2.0,794.9285436886763,102.42089246171629,5,11.060205999999999,2.8679780409184623,5,100.0,0.0,5,0.0,0.0,5,1.0,0.0,5,1.0,0.0,5
+random,16,4,4.0,843.1776460855693,118.45700610245702,5,9.8059904,2.2515927391149804,5,100.0,0.0,5,0.0,0.0,5,1.0,0.0,5,1.0,0.0,5
+random,32,4,8.0,864.0952132533515,96.04665051752751,5,70.1057774,116.72912791468266,5,100.0,0.0,5,0.0,0.0,5,1.0,0.0,5,1.0,0.0,5
