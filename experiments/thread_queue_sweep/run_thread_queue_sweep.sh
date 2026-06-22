@@ -78,6 +78,8 @@ TOTAL_RUNS=$((MODE_COUNT * LOAD_COUNT * SEED_COUNT * QUEUE_DEPTH_COUNT * THREAD_
   echo "  oversubscription > 1 creates competition for fixed fabric credits."
   echo "  Random is interpreted as the blocking/no-rejection baseline."
   echo "  CSMA/AIMD retain the same logical request across admission retries."
+  echo "  Each AIMD worker owns at most one submitted request."
+  echo "  AIMD device completion immediately releases its global in-flight slot."
   echo "  Their p99 values include admission waiting and backoff."
   echo "  acceptance rate means successful fabric admissions / admission attempts."
   echo "  Compare goodput, logical-request p99, attempt success rate, and retries per completion."
@@ -144,7 +146,7 @@ else
 fi
 
 echo "[INFO] Checking AIMD global controller metrics"
-BAD_AIMD=$(awk -F, 'NR>1 && $1=="aimd" && ($26 < 1 || $27 < 0 || $27 > $20 || $28 < 0 || $28 > $20) {print $0}' "$CLEAN" || true)
+BAD_AIMD=$(awk -F, 'NR>1 && $1=="aimd" && ($26 < 1 || $26 > $20 + 1 || $27 < 0 || $27 > $20 || $27 > $2 || $28 < 0 || $28 > $20 || $28 > $2) {print $0}' "$CLEAN" || true)
 if [[ -n "$BAD_AIMD" ]]; then
   echo "[WARN] Invalid AIMD global-controller rows found:"
   echo "$BAD_AIMD"

@@ -69,7 +69,10 @@ Optional arguments:
   the experiment stops.
 - `2` AIMD: adaptive outstanding request control using one global shared
   `cwnd` across all workers. Completion events grow the global window;
-  queue-full events reduce it at most once per congestion-control interval.
+  queue-full events reduce it at most once per completed-window interval.
+  Each worker owns at most one submitted request, matching the per-worker
+  concurrency of the Blocking and CSMA modes. The maximum global window is
+  `queue_depth + 1`, allowing one congestion probe.
 
 All modes share the same Type-3 backend, queue credits, request size, and device
 service threads. Only the request-injection policy changes.
@@ -96,6 +99,11 @@ track,load,seed,attempts,success,retry,backoff,delay_p50,delay_p95,delay_p99,goo
 For AIMD, `avg_cwnd`, `avg_inflight`, and the explicit `global_*` fields are
 global time-weighted controller measurements. For the non-AIMD modes, the
 explicit `global_*` fields are zero.
+
+An AIMD request registers an optional device-completion callback. The callback
+updates global in-flight state at the same device-completion event that returns
+the fabric credit; worker scheduling therefore cannot delay controller
+accounting. Blocking and CSMA requests do not register this callback.
 
 The `backend` field uses `type3_numa_nodeX` to show which NUMA node backs the
 simulated Type-3 memory device.

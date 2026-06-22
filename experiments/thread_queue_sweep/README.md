@@ -31,7 +31,9 @@ The policies use different pacing semantics:
 - `csma` retains the same logical request and retries it with exponential
   backoff when no credit is available.
 - `aimd` uses one global shared congestion window across all workers and also
-  retains the same logical request across retries.
+  retains the same logical request across retries. Each AIMD worker owns at
+  most one submitted request, and device completion immediately releases both
+  the fabric credit and the global AIMD in-flight slot.
 - Retry-based latency includes admission waiting and backoff.
 - Acceptance rate means successful admissions divided by admission attempts.
 

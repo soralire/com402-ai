@@ -72,8 +72,7 @@ static void controller_update_time_locked(aimd_controller_t *controller,
 
 int aimd_controller_init(aimd_controller_t *controller,
                          int initial_cwnd,
-                         int max_cwnd,
-                         uint64_t decrease_cooldown_ns) {
+                         int max_cwnd) {
     if (!controller || initial_cwnd < 1 || max_cwnd < initial_cwnd) {
         return -1;
     }
@@ -85,7 +84,6 @@ int aimd_controller_init(aimd_controller_t *controller,
 
     controller->cwnd = initial_cwnd;
     controller->max_cwnd = max_cwnd;
-    controller->decrease_cooldown_ns = decrease_cooldown_ns;
     controller->last_update_ns = now_ns();
     return 0;
 }
@@ -117,87 +115,21 @@ void aimd_controller_get_metrics(aimd_controller_t *controller,
     pthread_mutex_unlock(&controller->lock);
 }
 
-static int aimd_try_reserve(aimd_controller_t *controller,
-                            int *cwnd_out,
-                            int *inflight_out) {
-    int reserved = 0;
+/*
+ * Called by cxl_fabric.c while controller->lock is already held through the
+ * request's optional completion_lock. Credit release and this accounting are
+ * therefore atomic with respect to new AIMD submissions.
+ */
+static void aimd_on_device_completion_locked(void *ctx) {
+    aimd_controller_t *controller = (aimd_controller_t *)ctx;
 
-    pthread_mutex_lock(&controller->lock);
-    controller_update_time_locked(controller, now_ns());
-    if (controller->inflight + controller->reservations <
-        controller->cwnd) {
-        controller->reservations++;
-        reserved = 1;
-    }
-    *cwnd_out = controller->cwnd;
-    *inflight_out = controller->inflight;
-    pthread_mutex_unlock(&controller->lock);
-
-    return reserved;
-}
-
-static void aimd_confirm_submission(aimd_controller_t *controller,
-                                    int *cwnd_out,
-                                    int *inflight_out) {
-    pthread_mutex_lock(&controller->lock);
-    controller_update_time_locked(controller, now_ns());
-
-    if (controller->reservations > 0) {
-        controller->reservations--;
-    }
-    controller->inflight++;
-    if ((uint64_t)controller->inflight > controller->max_inflight) {
-        controller->max_inflight = (uint64_t)controller->inflight;
-    }
-
-    *cwnd_out = controller->cwnd;
-    *inflight_out = controller->inflight;
-    pthread_mutex_unlock(&controller->lock);
-}
-
-static void aimd_cancel_reservation_and_decrease(
-    aimd_controller_t *controller,
-    int *cwnd_out,
-    int *inflight_out) {
-    uint64_t now = now_ns();
-
-    pthread_mutex_lock(&controller->lock);
-    controller_update_time_locked(controller, now);
-
-    if (controller->reservations > 0) {
-        controller->reservations--;
-    }
-
-    /*
-     * Multiple workers can observe the same queue-full episode. Apply at most
-     * one multiplicative decrease per control interval so one congestion event
-     * does not cause every worker to halve the shared window independently.
-     */
-    if (now - controller->last_decrease_ns >=
-        controller->decrease_cooldown_ns) {
-        controller->cwnd /= 2;
-        if (controller->cwnd < 1) {
-            controller->cwnd = 1;
-        }
-        controller->acks_since_increase = 0;
-        controller->last_decrease_ns = now;
-    }
-
-    *cwnd_out = controller->cwnd;
-    *inflight_out = controller->inflight;
-    pthread_mutex_unlock(&controller->lock);
-}
-
-static void aimd_on_completion(aimd_controller_t *controller,
-                               int *cwnd_out,
-                               int *inflight_out) {
-    pthread_mutex_lock(&controller->lock);
     controller_update_time_locked(controller, now_ns());
 
     if (controller->inflight > 0) {
         controller->inflight--;
     }
 
+    controller->completion_count++;
     controller->acks_since_increase++;
     if (controller->acks_since_increase >= controller->cwnd) {
         if (controller->cwnd < controller->max_cwnd) {
@@ -205,10 +137,65 @@ static void aimd_on_completion(aimd_controller_t *controller,
         }
         controller->acks_since_increase = 0;
     }
+}
 
+/*
+ * Return values:
+ *   1: submitted to the fabric;
+ *   0: paced by the global cwnd, so no fabric admission was attempted;
+ *  -1: fabric admission failed and the same logical request must be retried.
+ */
+static int aimd_try_submit(aimd_controller_t *controller,
+                           cxl_fabric_t *fabric,
+                           cxl_request_t *req,
+                           int *cwnd_out,
+                           int *inflight_out) {
+    int result = 0;
+
+    pthread_mutex_lock(&controller->lock);
+    controller_update_time_locked(controller, now_ns());
+
+    if (controller->inflight + controller->reservations >=
+        controller->cwnd) {
+        goto out;
+    }
+
+    controller->reservations++;
+    if (cxl_fabric_submit_try(fabric, req) == 0) {
+        controller->reservations--;
+        controller->inflight++;
+        if ((uint64_t)controller->inflight > controller->max_inflight) {
+            controller->max_inflight = (uint64_t)controller->inflight;
+        }
+        result = 1;
+        goto out;
+    }
+
+    controller->reservations--;
+    result = -1;
+
+    /*
+     * Suppress repeated decreases from workers observing the same congestion
+     * episode. After a decrease, at least the old window's worth of device
+     * completions must occur before another multiplicative decrease.
+     */
+    if (controller->completion_count >=
+        controller->next_decrease_completion) {
+        int old_cwnd = controller->cwnd;
+        controller->cwnd /= 2;
+        if (controller->cwnd < 1) {
+            controller->cwnd = 1;
+        }
+        controller->acks_since_increase = 0;
+        controller->next_decrease_completion =
+            controller->completion_count + (uint64_t)old_cwnd;
+    }
+
+out:
     *cwnd_out = controller->cwnd;
     *inflight_out = controller->inflight;
     pthread_mutex_unlock(&controller->lock);
+    return result;
 }
 
 static void run_random(worker_arg_t *arg) {
@@ -276,8 +263,7 @@ static void run_csma(worker_arg_t *arg) {
 
 static int reap_completed(cxl_request_t **inflight,
                           int *count,
-                          thread_stats_t *stats,
-                          aimd_controller_t *controller) {
+                          thread_stats_t *stats) {
     int completed = 0;
 
     for (int i = 0; i < *count;) {
@@ -288,11 +274,6 @@ static int reap_completed(cxl_request_t **inflight,
 
         finish_request(stats, inflight[i]);
         completed++;
-
-        int cwnd = 1;
-        int global_inflight = 0;
-        aimd_on_completion(controller, &cwnd, &global_inflight);
-        thread_stats_record_window(stats, cwnd, global_inflight);
 
         for (int j = i + 1; j < *count; j++) {
             inflight[j - 1] = inflight[j];
@@ -305,8 +286,7 @@ static int reap_completed(cxl_request_t **inflight,
 
 static int wait_one_completion(cxl_request_t **inflight,
                                int *count,
-                               thread_stats_t *stats,
-                               aimd_controller_t *controller) {
+                               thread_stats_t *stats) {
     if (*count <= 0) {
         return 0;
     }
@@ -317,27 +297,32 @@ static int wait_one_completion(cxl_request_t **inflight,
         inflight[i - 1] = inflight[i];
     }
     (*count)--;
-
-    int cwnd = 1;
-    int global_inflight = 0;
-    aimd_on_completion(controller, &cwnd, &global_inflight);
-    thread_stats_record_window(stats, cwnd, global_inflight);
     return 1;
 }
 
 static void run_aimd(worker_arg_t *arg) {
     thread_stats_t *stats = arg->stats;
     aimd_controller_t *controller = arg->aimd;
-    cxl_request_t *inflight[AIMD_CWND_MAX] = {0};
+    cxl_request_t *inflight[AIMD_PER_WORKER_MAX_INFLIGHT] = {0};
     cxl_request_t *pending = NULL;
     int inflight_count = 0;
     int backoff_window_us = BACKOFF_MIN_US;
 
     while (!stop_requested()) {
-        int completed =
-            reap_completed(inflight, &inflight_count, stats, controller);
+        int completed = reap_completed(inflight, &inflight_count, stats);
         if (completed > 0) {
             relax_backoff(&backoff_window_us, BACKOFF_MIN_US);
+        }
+
+        /*
+         * Match the Blocking and CSMA per-worker concurrency: one worker owns
+         * at most one submitted request. The shared cwnd controls aggregate
+         * concurrency across workers, not private pipelining inside a worker.
+         */
+        if (inflight_count >= AIMD_PER_WORKER_MAX_INFLIGHT) {
+            wait_one_completion(inflight, &inflight_count, stats);
+            relax_backoff(&backoff_window_us, BACKOFF_MIN_US);
+            continue;
         }
 
         if (!pending) {
@@ -347,19 +332,26 @@ static void run_aimd(worker_arg_t *arg) {
                 usleep(AIMD_SLOT_WAIT_US);
                 continue;
             }
+            pending->completion_lock = &controller->lock;
+            pending->completion_cb = aimd_on_device_completion_locked;
+            pending->completion_ctx = controller;
         }
 
         int cwnd = 1;
         int global_inflight = 0;
-        if (!aimd_try_reserve(controller, &cwnd, &global_inflight)) {
+        int submit_result = aimd_try_submit(controller,
+                                            arg->fabric,
+                                            pending,
+                                            &cwnd,
+                                            &global_inflight);
+        if (submit_result == 0) {
             /*
              * Do not count controller pacing as a fabric retry. If this worker
              * owns completed requests, reap one so the global window can make
              * progress; otherwise briefly yield to workers holding requests.
              */
             if (inflight_count > 0) {
-                wait_one_completion(
-                    inflight, &inflight_count, stats, controller);
+                wait_one_completion(inflight, &inflight_count, stats);
                 relax_backoff(&backoff_window_us, BACKOFF_MIN_US);
             } else {
                 usleep(AIMD_SLOT_WAIT_US);
@@ -368,8 +360,7 @@ static void run_aimd(worker_arg_t *arg) {
         }
 
         stats->attempts++;
-        if (cxl_fabric_submit_try(arg->fabric, pending) == 0) {
-            aimd_confirm_submission(controller, &cwnd, &global_inflight);
+        if (submit_result > 0) {
             inflight[inflight_count++] = pending;
             pending = NULL;
             thread_stats_record_window(stats, cwnd, global_inflight);
@@ -383,8 +374,6 @@ static void run_aimd(worker_arg_t *arg) {
          */
         stats->retry++;
         stats->backoff++;
-        aimd_cancel_reservation_and_decrease(
-            controller, &cwnd, &global_inflight);
         thread_stats_record_window(stats, cwnd, global_inflight);
         random_backoff(&arg->rng, &backoff_window_us, BACKOFF_MAX_US);
     }
@@ -394,11 +383,9 @@ static void run_aimd(worker_arg_t *arg) {
     }
 
     while (inflight_count > 0) {
-        int completed =
-            reap_completed(inflight, &inflight_count, stats, controller);
+        int completed = reap_completed(inflight, &inflight_count, stats);
         if (completed == 0) {
-            wait_one_completion(
-                inflight, &inflight_count, stats, controller);
+            wait_one_completion(inflight, &inflight_count, stats);
         }
     }
 }

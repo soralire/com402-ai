@@ -8,10 +8,15 @@
 #include <stdint.h>
 #include <stdatomic.h>
 
+typedef void (*cxl_completion_cb_t)(void *ctx);
+
 typedef struct cxl_request {
     struct cxl_request *next;
     pthread_mutex_t lock;
     pthread_cond_t done_cond;
+    pthread_mutex_t *completion_lock;
+    cxl_completion_cb_t completion_cb;
+    void *completion_ctx;
     int done;
     uint64_t submit_ns;
     uint64_t complete_ns;

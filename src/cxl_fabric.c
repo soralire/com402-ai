@@ -52,11 +52,22 @@ static void complete_request(cxl_fabric_t *fabric, cxl_request_t *req) {
     req->done = 1;
 
     /*
-     * Make the completed request's fabric credit available before waking the
-     * submitting worker. Otherwise the worker can wake up, immediately try to
-     * submit its next request, and observe a transient false queue-full event.
+     * AIMD requests provide a completion lock and callback. Holding that lock
+     * across credit release and controller accounting makes the two state
+     * changes atomic with respect to new AIMD admissions. Other policies leave
+     * these fields NULL and retain the original completion path.
      */
+    if (req->completion_lock) {
+        pthread_mutex_lock(req->completion_lock);
+    }
     sem_post(&fabric->credits);
+    if (req->completion_cb) {
+        req->completion_cb(req->completion_ctx);
+    }
+    if (req->completion_lock) {
+        pthread_mutex_unlock(req->completion_lock);
+    }
+
     pthread_cond_signal(&req->done_cond);
     pthread_mutex_unlock(&req->lock);
 }

@@ -11,7 +11,7 @@
 #include <stdatomic.h>
 
 #define MAX_LAT_PER_THREAD 200000
-#define AIMD_CWND_MAX 64
+#define AIMD_PER_WORKER_MAX_INFLIGHT 1
 
 typedef struct {
     pthread_mutex_t lock;
@@ -21,8 +21,8 @@ typedef struct {
     int acks_since_increase;
     int max_cwnd;
     uint64_t max_inflight;
-    uint64_t last_decrease_ns;
-    uint64_t decrease_cooldown_ns;
+    uint64_t completion_count;
+    uint64_t next_decrease_completion;
     uint64_t last_update_ns;
     long double cwnd_time_ns;
     long double inflight_time_ns;
@@ -49,8 +49,7 @@ extern atomic_int stop_flag;
 
 int aimd_controller_init(aimd_controller_t *controller,
                          int initial_cwnd,
-                         int max_cwnd,
-                         uint64_t decrease_cooldown_ns);
+                         int max_cwnd);
 void aimd_controller_destroy(aimd_controller_t *controller);
 void aimd_controller_get_metrics(aimd_controller_t *controller,
                                  aimd_controller_metrics_t *metrics);

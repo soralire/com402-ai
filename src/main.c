@@ -162,11 +162,11 @@ int main(int argc, char **argv) {
     if (cfg.mode == 2) {
         /*
          * One shared window controls all workers targeting this fabric.
-         * The 1 ms cooldown coalesces simultaneous queue-full observations
-         * into one multiplicative decrease event.
+         * queue_depth + 1 permits one congestion probe beyond the known
+         * fabric-credit capacity without allowing an unbounded window.
          */
         if (aimd_controller_init(
-                &aimd_controller, 1, AIMD_CWND_MAX, 1000000ULL) != 0) {
+                &aimd_controller, 1, cfg.queue_depth + 1) != 0) {
             fprintf(stderr, "Error: AIMD controller initialization failed\n");
             goto cleanup;
         }
