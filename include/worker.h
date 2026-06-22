@@ -11,7 +11,6 @@
 #include <stdatomic.h>
 
 #define MAX_LAT_PER_THREAD 200000
-#define AIMD_PER_WORKER_MAX_INFLIGHT 1
 
 typedef struct {
     pthread_mutex_t lock;

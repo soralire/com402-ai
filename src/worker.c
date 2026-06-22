@@ -262,54 +262,36 @@ static void run_csma(worker_arg_t *arg) {
 }
 
 static int reap_completed(cxl_request_t **inflight,
-                          int *count,
                           thread_stats_t *stats) {
-    int completed = 0;
-
-    for (int i = 0; i < *count;) {
-        if (!cxl_request_is_done(inflight[i])) {
-            i++;
-            continue;
-        }
-
-        finish_request(stats, inflight[i]);
-        completed++;
-
-        for (int j = i + 1; j < *count; j++) {
-            inflight[j - 1] = inflight[j];
-        }
-        (*count)--;
-    }
-
-    return completed;
-}
-
-static int wait_one_completion(cxl_request_t **inflight,
-                               int *count,
-                               thread_stats_t *stats) {
-    if (*count <= 0) {
+    if (!*inflight || !cxl_request_is_done(*inflight)) {
         return 0;
     }
 
-    finish_request(stats, inflight[0]);
+    finish_request(stats, *inflight);
+    *inflight = NULL;
+    return 1;
+}
 
-    for (int i = 1; i < *count; i++) {
-        inflight[i - 1] = inflight[i];
+static int wait_one_completion(cxl_request_t **inflight,
+                               thread_stats_t *stats) {
+    if (!*inflight) {
+        return 0;
     }
-    (*count)--;
+
+    finish_request(stats, *inflight);
+    *inflight = NULL;
     return 1;
 }
 
 static void run_aimd(worker_arg_t *arg) {
     thread_stats_t *stats = arg->stats;
     aimd_controller_t *controller = arg->aimd;
-    cxl_request_t *inflight[AIMD_PER_WORKER_MAX_INFLIGHT] = {0};
+    cxl_request_t *inflight = NULL;
     cxl_request_t *pending = NULL;
-    int inflight_count = 0;
     int backoff_window_us = BACKOFF_MIN_US;
 
     while (!stop_requested()) {
-        int completed = reap_completed(inflight, &inflight_count, stats);
+        int completed = reap_completed(&inflight, stats);
         if (completed > 0) {
             relax_backoff(&backoff_window_us, BACKOFF_MIN_US);
         }
@@ -319,8 +301,8 @@ static void run_aimd(worker_arg_t *arg) {
          * at most one submitted request. The shared cwnd controls aggregate
          * concurrency across workers, not private pipelining inside a worker.
          */
-        if (inflight_count >= AIMD_PER_WORKER_MAX_INFLIGHT) {
-            wait_one_completion(inflight, &inflight_count, stats);
+        if (inflight) {
+            wait_one_completion(&inflight, stats);
             relax_backoff(&backoff_window_us, BACKOFF_MIN_US);
             continue;
         }
@@ -350,8 +332,8 @@ static void run_aimd(worker_arg_t *arg) {
              * owns completed requests, reap one so the global window can make
              * progress; otherwise briefly yield to workers holding requests.
              */
-            if (inflight_count > 0) {
-                wait_one_completion(inflight, &inflight_count, stats);
+            if (inflight) {
+                wait_one_completion(&inflight, stats);
                 relax_backoff(&backoff_window_us, BACKOFF_MIN_US);
             } else {
                 usleep(AIMD_SLOT_WAIT_US);
@@ -361,7 +343,7 @@ static void run_aimd(worker_arg_t *arg) {
 
         stats->attempts++;
         if (submit_result > 0) {
-            inflight[inflight_count++] = pending;
+            inflight = pending;
             pending = NULL;
             thread_stats_record_window(stats, cwnd, global_inflight);
             continue;
@@ -382,10 +364,10 @@ static void run_aimd(worker_arg_t *arg) {
         cxl_request_destroy(pending);
     }
 
-    while (inflight_count > 0) {
-        int completed = reap_completed(inflight, &inflight_count, stats);
+    while (inflight) {
+        int completed = reap_completed(&inflight, stats);
         if (completed == 0) {
-            wait_one_completion(inflight, &inflight_count, stats);
+            wait_one_completion(&inflight, stats);
         }
     }
 }
