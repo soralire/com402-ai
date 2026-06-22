@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# 原本的 thread/queue/device-worker sweep 实验。
-# 输出统一写入项目根目录 results/thread_queue_sweep/。
+# Minimal, interpretable worker/credit oversubscription experiment.
+#
+# The default run fixes load, queue depth, and device parallelism, then varies
+# only the worker count. Environment variables can still override every sweep
+# dimension when a broader experiment is intentionally required.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -13,18 +16,18 @@ RAW="${RAW:-$OUT_DIR/thread_queue_raw.csv}"
 CLEAN="${CLEAN:-$OUT_DIR/thread_queue_clean.csv}"
 PLAN="${PLAN:-$OUT_DIR/experiment_plan.txt}"
 
-THREADS_LIST="${THREADS_LIST:-${THREADS:-8 16}}"
-DURATION="${DURATION:-5}"
+THREADS_LIST="${THREADS_LIST:-${THREADS:-1 2 4 8 16 32}}"
+DURATION="${DURATION:-15}"
 MEM_NODE="${MEM_NODE:-1}"
 CPU_NODE="${CPU_NODE:-0}"
 MEM_MB="${MEM_MB:-512}"
 TOUCHES="${TOUCHES:-4096}"
-DEVICE_WORKERS_LIST="${DEVICE_WORKERS_LIST:-${DEVICE_WORKERS:-1 2}}"
+DEVICE_WORKERS_LIST="${DEVICE_WORKERS_LIST:-${DEVICE_WORKERS:-1}}"
 
 MODES="${MODES:-0 1 2}"
-LOADS="${LOADS:-10 30 50 70 90}"
-SEEDS="${SEEDS:-1 2 3}"
-QUEUE_DEPTHS="${QUEUE_DEPTHS:-${QUEUE_DEPTH:-4 8}}"
+LOADS="${LOADS:-100}"
+SEEDS="${SEEDS:-1 2 3 4 5}"
+QUEUE_DEPTHS="${QUEUE_DEPTHS:-${QUEUE_DEPTH:-4}}"
 
 count_words() {
   local count=0
@@ -47,12 +50,12 @@ DEVICE_WORKER_COUNT=$(count_words "$DEVICE_WORKERS_LIST")
 TOTAL_RUNS=$((MODE_COUNT * LOAD_COUNT * SEED_COUNT * QUEUE_DEPTH_COUNT * THREAD_COUNT * DEVICE_WORKER_COUNT))
 
 {
-  echo "Thread/queue sweep experiment for cxl_numa_csma"
+  echo "Worker/credit oversubscription experiment for cxl_numa_csma"
   echo
   echo "Model:"
   echo "  CPU workers -> CXL Switch queue -> Type-3 Memory Device -> NUMA remote memory backend"
   echo
-  echo "Fixed configuration:"
+  echo "Fixed/default configuration:"
   echo "  bin=$BIN"
   echo "  duration=$DURATION"
   echo "  mem_node=$MEM_NODE"
@@ -70,10 +73,13 @@ TOTAL_RUNS=$((MODE_COUNT * LOAD_COUNT * SEED_COUNT * QUEUE_DEPTH_COUNT * THREAD_
   echo "  total_runs=$TOTAL_RUNS"
   echo
   echo "Interpretation:"
-  echo "  threads > queue_depth recreates CXL Switch contention after queue_depth was expanded."
-  echo "  queue_depth controls global concurrent slots in the CXL Switch / Type-3 queue."
-  echo "  device_workers controls Type-3 backend service parallelism."
-  echo "  Compare retry rate, goodput, p99 latency, and avg_cwnd across modes at the same load."
+  echo "  oversubscription = threads / queue_depth."
+  echo "  oversubscription <= 1 is the low-contention region."
+  echo "  oversubscription > 1 creates competition for fixed fabric credits."
+  echo "  Random is interpreted as the blocking/no-rejection baseline."
+  echo "  CSMA/AIMD retry counters are interpreted as admission rejections."
+  echo "  Their p99 values describe admitted and completed requests only."
+  echo "  Compare goodput, admitted-request p99, acceptance rate, and rejections per completion."
 } | tee "$PLAN"
 
 if command -v numactl >/dev/null 2>&1; then
@@ -116,6 +122,15 @@ if [[ -n "$BAD" ]]; then
   echo "$BAD"
 else
   echo "[OK] Percentile order is valid"
+fi
+
+echo "[INFO] Checking request accounting: attempts = success + retry"
+BAD_ACCOUNTING=$(awk -F, 'NR>1 && ($4 != $5 + $6) {print $0}' "$CLEAN" || true)
+if [[ -n "$BAD_ACCOUNTING" ]]; then
+  echo "[WARN] Request-accounting rows found:"
+  echo "$BAD_ACCOUNTING"
+else
+  echo "[OK] Request accounting is valid"
 fi
 
 echo "[INFO] Plot command:"

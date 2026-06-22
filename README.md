@@ -73,6 +73,13 @@ Optional arguments:
 All modes share the same Type-3 backend, queue credits, request size, and device
 service threads. Only the request-injection policy changes.
 
+For result interpretation, mode 0 is the blocking/no-rejection baseline. In the
+current implementation, modes 1 and 2 discard an attempt when non-blocking
+credit acquisition fails. Their `retry` field is therefore interpreted as an
+admission rejection, and their latency percentiles cover admitted/completed
+requests only. Latency must be reported together with acceptance rate
+(`success / attempts`).
+
 ## Examples
 
 ```bash
@@ -84,7 +91,7 @@ service threads. Only the request-injection policy changes.
 Each run prints one CSV header and one result row:
 
 ```text
-track,load,seed,attempts,success,retry,backoff,delay_p50,delay_p95,delay_p99,goodput,threads,seconds,mem_node,cpu_node,mem_mb,touches_per_req,latency_samples,backend,queue_depth,device_workers,avg_cwnd,avg_inflight,max_inflight
+track,load,seed,attempts,success,retry,backoff,delay_p50,delay_p95,delay_p99,goodput,threads,seconds,mem_node,cpu_node,mem_mb,touches_per_req,latency_samples,backend,queue_depth,device_workers,avg_cwnd,avg_inflight,max_inflight,elapsed_s
 ```
 
 The `backend` field uses `type3_numa_nodeX` to show which NUMA node backs the
@@ -107,21 +114,22 @@ results/
 
 ### Thread/Queue Sweep
 
-The original sweep focuses on AIMD-relevant oversubscription:
+The default experiment isolates worker/credit oversubscription by fixing load,
+queue depth, and device parallelism:
 
 ```text
 modes:          0 1 2
-loads:          10 30 50 70 90
-seeds:          1 2 3
-queue_depths:   4 8
-threads:        8 16
-device_workers: 1 2
-duration:       5 seconds
+load:           100
+seeds:          1 2 3 4 5
+queue_depth:    4
+threads:        1 2 4 8 16 32
+device_workers: 1
+duration:       15 seconds
 ```
 
-This plan is designed to keep `threads > queue_depth` in several cases, so the
-CXL Switch / Type-3 credits create real backpressure. `device_workers=1/2`
-separates switch-credit contention from backend service parallelism.
+The main independent variable is `threads / queue_depth`. Values at or below
+one are the low-contention region; values above one oversubscribe the fixed
+fabric credits.
 
 Run the default sweep:
 
@@ -129,16 +137,16 @@ Run the default sweep:
 ./experiments/thread_queue_sweep/run_thread_queue_sweep.sh
 ```
 
-Run a smaller custom sweep:
+Run the blocking baseline alone:
 
 ```bash
-QUEUE_DEPTH=8 THREADS=16 DEVICE_WORKERS=1 LOADS="50 90" SEEDS="1" ./experiments/thread_queue_sweep/run_thread_queue_sweep.sh
+MODES="0" ./experiments/thread_queue_sweep/run_thread_queue_sweep.sh
 ```
 
-Run the full default shape explicitly:
+Custom sweeps remain available through environment variables:
 
 ```bash
-QUEUE_DEPTHS="4 8" THREADS_LIST="8 16" DEVICE_WORKERS_LIST="1 2" ./experiments/thread_queue_sweep/run_thread_queue_sweep.sh
+LOADS="100" QUEUE_DEPTHS="4" THREADS_LIST="1 2 4 8 16 32" DEVICE_WORKERS_LIST="1" ./experiments/thread_queue_sweep/run_thread_queue_sweep.sh
 ```
 
 The script writes `thread_queue_raw.csv`, `thread_queue_clean.csv`, and

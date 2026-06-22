@@ -76,13 +76,16 @@ static int start_workers(pthread_t *tids,
     return 0;
 }
 
-static void print_summary_csv(const config_t *cfg, const summary_stats_t *sum) {
+static void print_summary_csv(const config_t *cfg,
+                              const summary_stats_t *sum,
+                              double elapsed_s) {
     /* 每次运行输出一行 CSV，批量脚本会负责去掉重复 header。 */
     printf("track,load,seed,attempts,success,retry,backoff,"
            "delay_p50,delay_p95,delay_p99,goodput,threads,seconds,"
            "mem_node,cpu_node,mem_mb,touches_per_req,latency_samples,"
-           "backend,queue_depth,device_workers,avg_cwnd,avg_inflight,max_inflight\n");
-    printf("%s,%d,%u,%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%.2f,%d,%d,%d,%d,%d,%d,%" PRIu64 ",type3_numa_node%d,%d,%d,%.2f,%.2f,%" PRIu64 "\n",
+           "backend,queue_depth,device_workers,avg_cwnd,avg_inflight,max_inflight,"
+           "elapsed_s\n");
+    printf("%s,%d,%u,%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%.2f,%d,%d,%d,%d,%d,%d,%" PRIu64 ",type3_numa_node%d,%d,%d,%.2f,%.2f,%" PRIu64 ",%.6f\n",
            mode_name(cfg->mode),
            cfg->load,
            cfg->seed,
@@ -106,7 +109,8 @@ static void print_summary_csv(const config_t *cfg, const summary_stats_t *sum) {
            cfg->device_workers,
            sum->avg_cwnd,
            sum->avg_inflight,
-           sum->max_inflight);
+           sum->max_inflight,
+           elapsed_s);
 }
 
 int main(int argc, char **argv) {
@@ -184,7 +188,7 @@ int main(int argc, char **argv) {
         goto cleanup;
     }
 
-    print_summary_csv(&cfg, &sum);
+    print_summary_csv(&cfg, &sum, elapsed_s);
     status = 0;
 
 cleanup:

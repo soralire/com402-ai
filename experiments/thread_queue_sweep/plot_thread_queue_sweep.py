@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Plot the original thread/queue sweep experiment results.
+Plot the worker/credit oversubscription experiment.
 
-Default input:
-  results/thread_queue_sweep/thread_queue_clean.csv
+The current C implementation has different admission semantics:
 
-Default output:
-  results/thread_queue_sweep/figures/
+* random blocks until a fabric credit is available;
+* csma and aimd count a failed try-acquire as retry/backoff and discard that
+  attempt.
+
+Therefore their latency percentiles describe admitted/completed requests only.
+This plotter always presents that latency together with acceptance rate.
 """
 
 from __future__ import annotations
 
 import argparse
+import math
 from pathlib import Path
 
 import matplotlib
@@ -24,9 +28,9 @@ import pandas as pd
 
 MODE_ORDER = ["random", "csma", "aimd"]
 MODE_LABELS = {
-    "random": "Random",
-    "csma": "CSMA-like",
-    "aimd": "AIMD",
+    "random": "Blocking",
+    "csma": "Backoff admission",
+    "aimd": "AIMD admission",
 }
 
 NUMERIC_COLS = [
@@ -52,6 +56,7 @@ NUMERIC_COLS = [
     "avg_cwnd",
     "avg_inflight",
     "max_inflight",
+    "elapsed_s",
 ]
 
 
@@ -59,7 +64,7 @@ def parse_args() -> argparse.Namespace:
     project_dir = Path(__file__).resolve().parents[2]
     result_dir = project_dir / "results" / "thread_queue_sweep"
     parser = argparse.ArgumentParser(
-        description="Generate figures for the thread/queue sweep experiment."
+        description="Plot policy behavior against worker/credit oversubscription."
     )
     parser.add_argument(
         "--csv",
@@ -71,7 +76,14 @@ def parse_args() -> argparse.Namespace:
         "--out-dir",
         type=Path,
         default=result_dir / "figures",
-        help="Output directory for figures.",
+        help="Output directory for figures and summaries.",
+    )
+    parser.add_argument("--load", type=int, default=100, help="Load value to plot.")
+    parser.add_argument(
+        "--queue-depth", type=int, default=4, help="Queue-credit depth to plot."
+    )
+    parser.add_argument(
+        "--device-workers", type=int, default=1, help="Device-worker count to plot."
     )
     parser.add_argument(
         "--format",
@@ -84,26 +96,80 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def safe_ratio(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
+    return numerator / denominator.where(denominator > 0)
+
+
 def read_results(path: Path) -> pd.DataFrame:
     if not path.exists():
         raise FileNotFoundError(f"CSV file does not exist: {path}")
 
     df = pd.read_csv(path)
+    if "track" not in df.columns:
+        raise ValueError("CSV must contain a 'track' column")
+
     df = df[df["track"].astype(str).str.lower() != "track"].copy()
     df["track"] = df["track"].astype(str).str.strip().str.lower()
     for col in NUMERIC_COLS:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
-    df = df.dropna(subset=["track", "load", "goodput"]).copy()
-    df["load"] = df["load"].astype(int)
-    for col in ["delay_p50", "delay_p95", "delay_p99"]:
-        if col in df.columns:
-            df[f"{col}_ms"] = df[col] / 1_000_000.0
-    if {"attempts", "retry"}.issubset(df.columns):
-        df["retry_rate_pct"] = df["retry"] / df["attempts"].where(df["attempts"] > 0) * 100.0
-    if {"attempts", "backoff"}.issubset(df.columns):
-        df["backoff_rate_pct"] = df["backoff"] / df["attempts"].where(df["attempts"] > 0) * 100.0
+
+    required = {
+        "track",
+        "load",
+        "seed",
+        "attempts",
+        "success",
+        "retry",
+        "delay_p99",
+        "goodput",
+        "threads",
+        "queue_depth",
+        "device_workers",
+    }
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"CSV is missing required columns: {sorted(missing)}")
+
+    df = df.dropna(subset=list(required)).copy()
+    df["delay_p99_ms"] = df["delay_p99"] / 1_000_000.0
+    df["acceptance_rate_pct"] = (
+        safe_ratio(df["success"], df["attempts"]) * 100.0
+    )
+    df["admission_rejections_per_completion"] = safe_ratio(
+        df["retry"], df["success"]
+    )
+    df["oversubscription"] = safe_ratio(df["threads"], df["queue_depth"])
+
+    if "elapsed_s" in df.columns:
+        df["measured_completion_rate"] = safe_ratio(df["success"], df["elapsed_s"])
+    else:
+        # Older CSV files remain readable. Their existing goodput was already
+        # calculated from measured elapsed time inside the C program.
+        df["measured_completion_rate"] = df["goodput"]
+
     return df.reset_index(drop=True)
+
+
+def filter_experiment(df: pd.DataFrame, args: argparse.Namespace) -> pd.DataFrame:
+    selected = df[
+        (df["load"] == args.load)
+        & (df["queue_depth"] == args.queue_depth)
+        & (df["device_workers"] == args.device_workers)
+    ].copy()
+    if selected.empty:
+        available = (
+            df[["load", "queue_depth", "device_workers"]]
+            .drop_duplicates()
+            .sort_values(["load", "queue_depth", "device_workers"])
+        )
+        raise ValueError(
+            "No rows match "
+            f"load={args.load}, queue_depth={args.queue_depth}, "
+            f"device_workers={args.device_workers}.\n"
+            f"Available configurations:\n{available.to_string(index=False)}"
+        )
+    return selected
 
 
 def ordered_modes(values: pd.Series) -> list[str]:
@@ -111,6 +177,20 @@ def ordered_modes(values: pd.Series) -> list[str]:
     known = [mode for mode in MODE_ORDER if mode in present]
     unknown = sorted(mode for mode in present if mode not in MODE_ORDER)
     return known + unknown
+
+
+def aggregate_metric(df: pd.DataFrame, metric: str) -> pd.DataFrame:
+    grouped = (
+        df.groupby(["track", "threads", "queue_depth", "oversubscription"])[metric]
+        .agg(mean="mean", std="std", count="count")
+        .reset_index()
+    )
+    grouped["ci95"] = (
+        1.96
+        * grouped["std"].fillna(0.0)
+        / grouped["count"].clip(lower=1).map(math.sqrt)
+    )
+    return grouped
 
 
 def savefig(out_dir: Path, stem: str, fmt: str, dpi: int) -> Path:
@@ -121,102 +201,175 @@ def savefig(out_dir: Path, stem: str, fmt: str, dpi: int) -> Path:
     return out_path
 
 
-def config_columns(df: pd.DataFrame) -> list[str]:
-    cols: list[str] = []
-    for col in ["threads", "queue_depth", "device_workers"]:
-        if col in df.columns and df[col].nunique(dropna=True) > 1:
-            cols.append(col)
-    return cols
+def format_oversubscription_axis(ax: plt.Axes, values: pd.Series) -> None:
+    ticks = sorted(values.dropna().unique())
+    if ticks and min(ticks) > 0:
+        ax.set_xscale("log", base=2)
+        ax.set_xticks(ticks)
+        ax.set_xticklabels([f"{value:g}" for value in ticks])
+    ax.axvline(1.0, color="black", linestyle=":", linewidth=1.2, alpha=0.8)
+    ax.grid(True, linestyle="--", alpha=0.4)
 
 
-def config_label(row: pd.Series, cols: list[str]) -> str:
-    if not cols:
-        return "all configs"
-    parts = []
-    for col in cols:
-        value = row[col]
-        if pd.notna(value) and float(value).is_integer():
-            value = int(value)
-        parts.append(f"{col}={value}")
-    return ", ".join(parts)
+def plot_vs_oversubscription(
+    df: pd.DataFrame,
+    metric: str,
+    ylabel: str,
+    title: str,
+    stem: str,
+    out_dir: Path,
+    fmt: str,
+    dpi: int,
+) -> Path:
+    agg = aggregate_metric(df, metric)
+    plt.figure(figsize=(8.2, 5.2))
+    ax = plt.gca()
 
+    for mode in ordered_modes(agg["track"]):
+        sub = agg[agg["track"] == mode].sort_values("oversubscription")
+        ax.errorbar(
+            sub["oversubscription"],
+            sub["mean"],
+            yerr=sub["ci95"],
+            marker="o",
+            linewidth=2,
+            capsize=3,
+            label=MODE_LABELS.get(mode, mode),
+        )
 
-def plot_metric(df: pd.DataFrame, metric: str, ylabel: str, title: str, stem: str, out_dir: Path, fmt: str, dpi: int) -> Path | None:
-    if metric not in df.columns:
-        return None
-
-    group_cols = ["track", "load", *config_columns(df)]
-    agg = df.groupby(group_cols, dropna=False)[metric].mean().reset_index()
-    if agg.empty:
-        return None
-
-    cfg_cols = config_columns(df)
-    if cfg_cols:
-        configs = agg[cfg_cols].drop_duplicates().sort_values(cfg_cols).reset_index(drop=True)
-    else:
-        configs = pd.DataFrame([{}])
-
-    n_panels = len(configs)
-    fig, axes = plt.subplots(n_panels, 1, figsize=(8, max(4.5, 3.5 * n_panels)), squeeze=False)
-    for ax, (_, cfg) in zip(axes.ravel(), configs.iterrows()):
-        sub_cfg = agg
-        if cfg_cols:
-            mask = pd.Series(True, index=agg.index)
-            for col in cfg_cols:
-                mask &= agg[col].eq(cfg[col])
-            sub_cfg = agg[mask]
-
-        for mode in ordered_modes(sub_cfg["track"]):
-            sub = sub_cfg[sub_cfg["track"] == mode].sort_values("load")
-            if sub.empty:
-                continue
-            ax.plot(sub["load"], sub[metric], marker="o", linewidth=2, label=MODE_LABELS.get(mode, mode))
-
-        ax.set_title(config_label(cfg, cfg_cols))
-        ax.set_xlabel("Load (%)")
-        ax.set_ylabel(ylabel)
-        ax.grid(True, linestyle="--", alpha=0.45)
-        ax.legend(fontsize=9)
-
-    fig.suptitle(title, y=1.01, fontsize=14)
+    format_oversubscription_axis(ax, agg["oversubscription"])
+    ax.set_xlabel("Worker/credit oversubscription (threads / queue depth)")
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.legend()
     return savefig(out_dir, stem, fmt, dpi)
+
+
+def plot_tradeoff(
+    df: pd.DataFrame, out_dir: Path, fmt: str, dpi: int
+) -> Path:
+    goodput = aggregate_metric(df, "measured_completion_rate")
+    latency = aggregate_metric(df, "delay_p99_ms")
+    agg = goodput.merge(
+        latency,
+        on=["track", "threads", "queue_depth", "oversubscription"],
+        suffixes=("_goodput", "_p99"),
+    )
+
+    plt.figure(figsize=(8.2, 5.5))
+    ax = plt.gca()
+    for mode in ordered_modes(agg["track"]):
+        sub = agg[agg["track"] == mode].sort_values("oversubscription")
+        ax.errorbar(
+            sub["mean_p99"],
+            sub["mean_goodput"],
+            xerr=sub["ci95_p99"],
+            yerr=sub["ci95_goodput"],
+            marker="o",
+            linewidth=2,
+            capsize=3,
+            label=MODE_LABELS.get(mode, mode),
+        )
+        for _, row in sub.iterrows():
+            ax.annotate(
+                f"{row['oversubscription']:g}x",
+                (row["mean_p99"], row["mean_goodput"]),
+                xytext=(4, 4),
+                textcoords="offset points",
+                fontsize=8,
+            )
+
+    ax.set_xlabel("Admitted-request p99 latency (ms)")
+    ax.set_ylabel("Completed goodput (requests/s)")
+    ax.set_title("Goodput vs admitted-request p99\n(labels show worker/credit ratio)")
+    ax.grid(True, linestyle="--", alpha=0.4)
+    ax.legend()
+    return savefig(out_dir, "goodput_vs_admitted_p99_tradeoff", fmt, dpi)
+
+
+def write_summary(df: pd.DataFrame, out_dir: Path) -> Path:
+    metrics = [
+        "measured_completion_rate",
+        "delay_p99_ms",
+        "acceptance_rate_pct",
+        "admission_rejections_per_completion",
+        "avg_cwnd",
+        "avg_inflight",
+    ]
+    metrics = [metric for metric in metrics if metric in df.columns]
+    summary = df.groupby(
+        ["track", "threads", "queue_depth", "oversubscription"], dropna=False
+    )[metrics].agg(["mean", "std", "count"])
+    summary.columns = [
+        "_".join(column).strip("_") for column in summary.columns.to_flat_index()
+    ]
+    summary = summary.reset_index()
+    path = out_dir / "summary_by_oversubscription.csv"
+    summary.to_csv(path, index=False)
+    return path
 
 
 def main() -> None:
     args = parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
-    df = read_results(args.csv)
-    generated: list[Path] = []
+    all_rows = read_results(args.csv)
+    df = filter_experiment(all_rows, args)
 
-    specs = [
-        ("goodput", "Goodput (requests/s)", "Thread/queue sweep: goodput", "thread_queue_goodput"),
-        ("delay_p99_ms", "p99 latency (ms)", "Thread/queue sweep: p99 latency", "thread_queue_p99_latency"),
-        ("retry_rate_pct", "Retry rate (%)", "Thread/queue sweep: retry rate", "thread_queue_retry_rate"),
-        ("backoff_rate_pct", "Backoff rate (%)", "Thread/queue sweep: backoff rate", "thread_queue_backoff_rate"),
-        ("avg_cwnd", "Average cwnd", "Thread/queue sweep: AIMD cwnd", "thread_queue_avg_cwnd"),
-        ("avg_inflight", "Average in-flight requests", "Thread/queue sweep: in-flight requests", "thread_queue_avg_inflight"),
+    generated = [
+        plot_vs_oversubscription(
+            df,
+            "measured_completion_rate",
+            "Completed goodput (requests/s)",
+            "Completed goodput vs worker/credit oversubscription",
+            "oversubscription_vs_goodput",
+            args.out_dir,
+            args.fmt,
+            args.dpi,
+        ),
+        plot_vs_oversubscription(
+            df,
+            "delay_p99_ms",
+            "Admitted-request p99 latency (ms)",
+            "Admitted-request p99 vs worker/credit oversubscription",
+            "oversubscription_vs_admitted_p99",
+            args.out_dir,
+            args.fmt,
+            args.dpi,
+        ),
+        plot_vs_oversubscription(
+            df,
+            "acceptance_rate_pct",
+            "Acceptance rate: success / attempts (%)",
+            "Acceptance rate vs worker/credit oversubscription",
+            "oversubscription_vs_acceptance",
+            args.out_dir,
+            args.fmt,
+            args.dpi,
+        ),
+        plot_tradeoff(df, args.out_dir, args.fmt, args.dpi),
+        write_summary(df, args.out_dir),
     ]
-    for metric, ylabel, title, stem in specs:
-        path = plot_metric(df, metric, ylabel, title, stem, args.out_dir, args.fmt, args.dpi)
-        if path is not None:
-            generated.append(path)
-
-    summary_path = args.out_dir / "summary_by_config.csv"
-    summary_cols = [c for c in ["goodput", "delay_p50_ms", "delay_p95_ms", "delay_p99_ms", "retry_rate_pct", "backoff_rate_pct", "avg_cwnd", "avg_inflight"] if c in df.columns]
-    df.groupby(["track", "load", *config_columns(df)], dropna=False)[summary_cols].mean().reset_index().to_csv(summary_path, index=False)
-    generated.append(summary_path)
 
     manifest = args.out_dir / "figure_manifest.txt"
-    with manifest.open("w", encoding="utf-8") as f:
-        f.write("Thread/queue sweep figures\n")
-        f.write(f"Input CSV: {args.csv}\n")
-        f.write(f"Rows: {len(df)}\n\n")
+    with manifest.open("w", encoding="utf-8") as file:
+        file.write("Worker/credit oversubscription figures\n")
+        file.write(f"Input CSV: {args.csv}\n")
+        file.write(
+            f"Filter: load={args.load}, queue_depth={args.queue_depth}, "
+            f"device_workers={args.device_workers}\n"
+        )
+        file.write(f"Rows used: {len(df)}\n\n")
+        file.write(
+            "Interpretation: p99 covers admitted/completed requests only; "
+            "read it together with acceptance rate.\n\n"
+        )
         for path in generated:
-            f.write(path.name + "\n")
+            file.write(path.name + "\n")
     generated.append(manifest)
 
-    print(f"Loaded {len(df)} rows from {args.csv}")
+    print(f"Loaded {len(all_rows)} rows from {args.csv}")
+    print(f"Used {len(df)} rows after the fixed-configuration filter")
     print(f"Generated {len(generated)} files under {args.out_dir}")
     for path in generated:
         print(f"  - {path.name}")
