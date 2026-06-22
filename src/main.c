@@ -27,7 +27,8 @@ static int init_worker_args(worker_arg_t *args,
                             thread_stats_t *stats,
                             int nthreads,
                             const config_t *cfg,
-                            cxl_fabric_t *fabric) {
+                            cxl_fabric_t *fabric,
+                            aimd_controller_t *aimd) {
     /* 为每个 worker 准备独立随机种子和统计缓冲，避免线程之间共享统计结构。 */
     for (int i = 0; i < nthreads; i++) {
         if (thread_stats_init(&stats[i], MAX_LAT_PER_THREAD) != 0) {
@@ -37,6 +38,7 @@ static int init_worker_args(worker_arg_t *args,
 
         args[i].cfg = cfg;
         args[i].fabric = fabric;
+        args[i].aimd = aimd;
         args[i].rng = cfg->seed + (unsigned int)i * 10007U;
         args[i].stats = &stats[i];
     }
@@ -84,8 +86,8 @@ static void print_summary_csv(const config_t *cfg,
            "delay_p50,delay_p95,delay_p99,goodput,threads,seconds,"
            "mem_node,cpu_node,mem_mb,touches_per_req,latency_samples,"
            "backend,queue_depth,device_workers,avg_cwnd,avg_inflight,max_inflight,"
-           "elapsed_s\n");
-    printf("%s,%d,%u,%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%.2f,%d,%d,%d,%d,%d,%d,%" PRIu64 ",type3_numa_node%d,%d,%d,%.2f,%.2f,%" PRIu64 ",%.6f\n",
+           "elapsed_s,global_avg_cwnd,global_avg_inflight,global_max_inflight\n");
+    printf("%s,%d,%u,%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%.2f,%d,%d,%d,%d,%d,%d,%" PRIu64 ",type3_numa_node%d,%d,%d,%.2f,%.2f,%" PRIu64 ",%.6f,%.4f,%.4f,%" PRIu64 "\n",
            mode_name(cfg->mode),
            cfg->load,
            cfg->seed,
@@ -110,18 +112,23 @@ static void print_summary_csv(const config_t *cfg,
            sum->avg_cwnd,
            sum->avg_inflight,
            sum->max_inflight,
-           elapsed_s);
+           elapsed_s,
+           sum->global_avg_cwnd,
+           sum->global_avg_inflight,
+           sum->global_max_inflight);
 }
 
 int main(int argc, char **argv) {
     config_t cfg;
     memory_region_t region = {0};
     cxl_fabric_t fabric = {0};
+    aimd_controller_t aimd_controller = {0};
     pthread_t *tids = NULL;
     worker_arg_t *args = NULL;
     thread_stats_t *thread_stats = NULL;
     int created_threads = 0;
     int fabric_ready = 0;
+    int aimd_ready = 0;
     int stats_ready = 0;
     int status = 1;
 
@@ -152,6 +159,20 @@ int main(int argc, char **argv) {
     }
     fabric_ready = 1;
 
+    if (cfg.mode == 2) {
+        /*
+         * One shared window controls all workers targeting this fabric.
+         * The 1 ms cooldown coalesces simultaneous queue-full observations
+         * into one multiplicative decrease event.
+         */
+        if (aimd_controller_init(
+                &aimd_controller, 1, AIMD_CWND_MAX, 1000000ULL) != 0) {
+            fprintf(stderr, "Error: AIMD controller initialization failed\n");
+            goto cleanup;
+        }
+        aimd_ready = 1;
+    }
+
     tids = calloc((size_t)cfg.threads, sizeof(*tids));
     args = calloc((size_t)cfg.threads, sizeof(*args));
     thread_stats = calloc((size_t)cfg.threads, sizeof(*thread_stats));
@@ -160,7 +181,12 @@ int main(int argc, char **argv) {
         goto cleanup;
     }
 
-    if (init_worker_args(args, thread_stats, cfg.threads, &cfg, &fabric) != 0) {
+    if (init_worker_args(args,
+                         thread_stats,
+                         cfg.threads,
+                         &cfg,
+                         &fabric,
+                         aimd_ready ? &aimd_controller : NULL) != 0) {
         fprintf(stderr, "Error: latency buffer allocation failed\n");
         goto cleanup;
     }
@@ -188,6 +214,23 @@ int main(int argc, char **argv) {
         goto cleanup;
     }
 
+    if (aimd_ready) {
+        aimd_controller_metrics_t metrics;
+        aimd_controller_get_metrics(&aimd_controller, &metrics);
+
+        /*
+         * For AIMD, publish the shared controller's time-weighted values in
+         * both the legacy and explicit global fields. This replaces the old
+         * event-weighted per-worker averages.
+         */
+        sum.avg_cwnd = metrics.avg_cwnd;
+        sum.avg_inflight = metrics.avg_inflight;
+        sum.max_inflight = metrics.max_inflight;
+        sum.global_avg_cwnd = metrics.avg_cwnd;
+        sum.global_avg_inflight = metrics.avg_inflight;
+        sum.global_max_inflight = metrics.max_inflight;
+    }
+
     print_summary_csv(&cfg, &sum, elapsed_s);
     status = 0;
 
@@ -201,6 +244,9 @@ cleanup:
     }
     if (fabric_ready) {
         cxl_fabric_destroy(&fabric);
+    }
+    if (aimd_ready) {
+        aimd_controller_destroy(&aimd_controller);
     }
     memory_region_destroy(&region);
     free(thread_stats);

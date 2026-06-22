@@ -21,8 +21,8 @@ CPU workers
 - `queue_depth` models the number of concurrent CXL fabric / Type-3 queue
   credits. A request occupies one credit from submission until completion.
 - `device_workers` models Type-3 device-side service parallelism.
-- AIMD's `cwnd` is a per-worker outstanding request window, while `queue_depth`
-  is the global fabric/device capacity.
+- AIMD's `cwnd` is one global outstanding-request window shared by all CPU
+  workers, while `queue_depth` is the global fabric/device credit capacity.
 
 This is still a software model, but it is closer to a real CXL.mem system than a
 single host-side mutex: workers submit requests, device service threads execute
@@ -64,21 +64,20 @@ Optional arguments:
 
 - `0` Random: blocking credit acquisition. It waits for a CXL fabric credit,
   submits one request, then waits for completion.
-- `1` CSMA-like: non-blocking credit acquisition with random backoff. Queue-full
-  events count as retry/backoff.
-- `2` AIMD: adaptive outstanding request control. Each worker maintains a `cwnd`
-  and may keep multiple requests in flight. Completion events grow `cwnd`;
-  queue-full events halve `cwnd`.
+- `1` CSMA-like: non-blocking credit acquisition with exponential random
+  backoff. A logical request is retained and retried until it is submitted or
+  the experiment stops.
+- `2` AIMD: adaptive outstanding request control using one global shared
+  `cwnd` across all workers. Completion events grow the global window;
+  queue-full events reduce it at most once per congestion-control interval.
 
 All modes share the same Type-3 backend, queue credits, request size, and device
 service threads. Only the request-injection policy changes.
 
-For result interpretation, mode 0 is the blocking/no-rejection baseline. In the
-current implementation, modes 1 and 2 discard an attempt when non-blocking
-credit acquisition fails. Their `retry` field is therefore interpreted as an
-admission rejection, and their latency percentiles cover admitted/completed
-requests only. Latency must be reported together with acceptance rate
-(`success / attempts`).
+For result interpretation, mode 0 is the blocking/no-retry baseline. Modes 1
+and 2 preserve a logical request across admission retries, so their measured
+latency includes admission waiting and backoff. `success / attempts` is an
+admission-attempt success rate, not a logical-request completion percentage.
 
 ## Examples
 
@@ -91,8 +90,12 @@ requests only. Latency must be reported together with acceptance rate
 Each run prints one CSV header and one result row:
 
 ```text
-track,load,seed,attempts,success,retry,backoff,delay_p50,delay_p95,delay_p99,goodput,threads,seconds,mem_node,cpu_node,mem_mb,touches_per_req,latency_samples,backend,queue_depth,device_workers,avg_cwnd,avg_inflight,max_inflight,elapsed_s
+track,load,seed,attempts,success,retry,backoff,delay_p50,delay_p95,delay_p99,goodput,threads,seconds,mem_node,cpu_node,mem_mb,touches_per_req,latency_samples,backend,queue_depth,device_workers,avg_cwnd,avg_inflight,max_inflight,elapsed_s,global_avg_cwnd,global_avg_inflight,global_max_inflight
 ```
+
+For AIMD, `avg_cwnd`, `avg_inflight`, and the explicit `global_*` fields are
+global time-weighted controller measurements. For the non-AIMD modes, the
+explicit `global_*` fields are zero.
 
 The `backend` field uses `type3_numa_nodeX` to show which NUMA node backs the
 simulated Type-3 memory device.

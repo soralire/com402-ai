@@ -25,15 +25,18 @@ The main x-axis is:
 oversubscription = threads / queue_depth
 ```
 
-The current implementation has different admission semantics:
+The policies use different pacing semantics:
 
 - `random` blocks until a credit is available and is the no-rejection baseline.
-- `csma` and `aimd` discard an attempt when no credit is available.
-- Their `retry` counter is therefore interpreted as admission rejection.
-- Their latency percentiles cover admitted and completed requests only.
+- `csma` retains the same logical request and retries it with exponential
+  backoff when no credit is available.
+- `aimd` uses one global shared congestion window across all workers and also
+  retains the same logical request across retries.
+- Retry-based latency includes admission waiting and backoff.
+- Acceptance rate means successful admissions divided by admission attempts.
 
-For this reason, admitted-request p99 must be read together with acceptance
-rate and admission rejections per completion.
+For this reason, logical-request p99 must be read together with attempt success
+rate and retries per completion.
 
 Run from the project root:
 
@@ -49,9 +52,11 @@ The plotting script generates:
 
 ```text
 oversubscription_vs_goodput
-oversubscription_vs_admitted_p99
+oversubscription_vs_logical_request_p99
 oversubscription_vs_acceptance
-goodput_vs_admitted_p99_tradeoff
+oversubscription_vs_rejections_per_completion
+goodput_vs_logical_request_p99_tradeoff
+aimd_global_window
 ```
 
 Custom environment variables remain supported. Run the blocking baseline alone

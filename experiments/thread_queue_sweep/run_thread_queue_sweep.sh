@@ -77,9 +77,10 @@ TOTAL_RUNS=$((MODE_COUNT * LOAD_COUNT * SEED_COUNT * QUEUE_DEPTH_COUNT * THREAD_
   echo "  oversubscription <= 1 is the low-contention region."
   echo "  oversubscription > 1 creates competition for fixed fabric credits."
   echo "  Random is interpreted as the blocking/no-rejection baseline."
-  echo "  CSMA/AIMD retry counters are interpreted as admission rejections."
-  echo "  Their p99 values describe admitted and completed requests only."
-  echo "  Compare goodput, admitted-request p99, acceptance rate, and rejections per completion."
+  echo "  CSMA/AIMD retain the same logical request across admission retries."
+  echo "  Their p99 values include admission waiting and backoff."
+  echo "  acceptance rate means successful fabric admissions / admission attempts."
+  echo "  Compare goodput, logical-request p99, attempt success rate, and retries per completion."
 } | tee "$PLAN"
 
 if command -v numactl >/dev/null 2>&1; then
@@ -131,6 +132,24 @@ if [[ -n "$BAD_ACCOUNTING" ]]; then
   echo "$BAD_ACCOUNTING"
 else
   echo "[OK] Request accounting is valid"
+fi
+
+echo "[INFO] Checking retry accounting: retry = backoff"
+BAD_RETRY=$(awk -F, 'NR>1 && ($6 != $7) {print $0}' "$CLEAN" || true)
+if [[ -n "$BAD_RETRY" ]]; then
+  echo "[WARN] Retry/backoff mismatch rows found:"
+  echo "$BAD_RETRY"
+else
+  echo "[OK] Retry/backoff accounting is valid"
+fi
+
+echo "[INFO] Checking AIMD global controller metrics"
+BAD_AIMD=$(awk -F, 'NR>1 && $1=="aimd" && ($26 < 1 || $27 < 0 || $27 > $20 || $28 < 0 || $28 > $20) {print $0}' "$CLEAN" || true)
+if [[ -n "$BAD_AIMD" ]]; then
+  echo "[WARN] Invalid AIMD global-controller rows found:"
+  echo "$BAD_AIMD"
+else
+  echo "[OK] AIMD global-controller metrics are in range"
 fi
 
 echo "[INFO] Plot command:"

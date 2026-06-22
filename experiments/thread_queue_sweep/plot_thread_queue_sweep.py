@@ -3,14 +3,13 @@
 """
 Plot the worker/credit oversubscription experiment.
 
-The current C implementation has different admission semantics:
+The policies have different pacing semantics:
 
 * random blocks until a fabric credit is available;
-* csma and aimd count a failed try-acquire as retry/backoff and discard that
-  attempt.
+* csma and aimd retain a logical request across failed admission attempts;
+* aimd uses one global shared congestion window across all workers.
 
-Therefore their latency percentiles describe admitted/completed requests only.
-This plotter always presents that latency together with acceptance rate.
+Latency for retry-based policies includes admission waiting and backoff.
 """
 
 from __future__ import annotations
@@ -29,8 +28,8 @@ import pandas as pd
 MODE_ORDER = ["random", "csma", "aimd"]
 MODE_LABELS = {
     "random": "Blocking",
-    "csma": "Backoff admission",
-    "aimd": "AIMD admission",
+    "csma": "Backoff retry",
+    "aimd": "Global AIMD",
 }
 
 NUMERIC_COLS = [
@@ -57,6 +56,9 @@ NUMERIC_COLS = [
     "avg_inflight",
     "max_inflight",
     "elapsed_s",
+    "global_avg_cwnd",
+    "global_avg_inflight",
+    "global_max_inflight",
 ]
 
 
@@ -140,6 +142,10 @@ def read_results(path: Path) -> pd.DataFrame:
         df["retry"], df["success"]
     )
     df["oversubscription"] = safe_ratio(df["threads"], df["queue_depth"])
+    if "global_avg_cwnd" in df.columns:
+        df["global_window_pressure"] = safe_ratio(
+            df["global_avg_cwnd"], df["queue_depth"]
+        )
 
     if "elapsed_s" in df.columns:
         df["measured_completion_rate"] = safe_ratio(df["success"], df["elapsed_s"])
@@ -185,8 +191,25 @@ def aggregate_metric(df: pd.DataFrame, metric: str) -> pd.DataFrame:
         .agg(mean="mean", std="std", count="count")
         .reset_index()
     )
+    # Student-t critical values are more appropriate than 1.96 for the small
+    # seed counts used by these experiments (normally n=5).
+    t95 = {
+        1: 0.0,
+        2: 12.706,
+        3: 4.303,
+        4: 3.182,
+        5: 2.776,
+        6: 2.571,
+        7: 2.447,
+        8: 2.365,
+        9: 2.306,
+        10: 2.262,
+    }
+    grouped["critical95"] = grouped["count"].map(
+        lambda count: t95.get(int(count), 1.96)
+    )
     grouped["ci95"] = (
-        1.96
+        grouped["critical95"]
         * grouped["std"].fillna(0.0)
         / grouped["count"].clip(lower=1).map(math.sqrt)
     )
@@ -220,6 +243,7 @@ def plot_vs_oversubscription(
     out_dir: Path,
     fmt: str,
     dpi: int,
+    ylim: tuple[float, float] | None = None,
 ) -> Path:
     agg = aggregate_metric(df, metric)
     plt.figure(figsize=(8.2, 5.2))
@@ -241,6 +265,8 @@ def plot_vs_oversubscription(
     ax.set_xlabel("Worker/credit oversubscription (threads / queue depth)")
     ax.set_ylabel(ylabel)
     ax.set_title(title)
+    if ylim is not None:
+        ax.set_ylim(*ylim)
     ax.legend()
     return savefig(out_dir, stem, fmt, dpi)
 
@@ -279,12 +305,51 @@ def plot_tradeoff(
                 fontsize=8,
             )
 
-    ax.set_xlabel("Admitted-request p99 latency (ms)")
+    ax.set_xlabel("Logical-request end-to-end p99 latency (ms)")
     ax.set_ylabel("Completed goodput (requests/s)")
-    ax.set_title("Goodput vs admitted-request p99\n(labels show worker/credit ratio)")
+    ax.set_title("Goodput vs logical-request p99\n(labels show worker/credit ratio)")
     ax.grid(True, linestyle="--", alpha=0.4)
     ax.legend()
-    return savefig(out_dir, "goodput_vs_admitted_p99_tradeoff", fmt, dpi)
+    return savefig(out_dir, "goodput_vs_logical_request_p99_tradeoff", fmt, dpi)
+
+
+def plot_aimd_global_window(
+    df: pd.DataFrame, out_dir: Path, fmt: str, dpi: int
+) -> Path | None:
+    required = {"global_avg_cwnd", "global_avg_inflight"}
+    if not required.issubset(df.columns):
+        return None
+
+    aimd = df[df["track"] == "aimd"].copy()
+    if aimd.empty or aimd["global_avg_cwnd"].fillna(0).max() <= 0:
+        return None
+
+    cwnd = aggregate_metric(aimd, "global_avg_cwnd")
+    inflight = aggregate_metric(aimd, "global_avg_inflight")
+
+    plt.figure(figsize=(8.2, 5.2))
+    ax = plt.gca()
+    for agg, label, marker in [
+        (cwnd, "Global time-weighted cwnd", "o"),
+        (inflight, "Global time-weighted in-flight", "s"),
+    ]:
+        sub = agg.sort_values("oversubscription")
+        ax.errorbar(
+            sub["oversubscription"],
+            sub["mean"],
+            yerr=sub["ci95"],
+            marker=marker,
+            linewidth=2,
+            capsize=3,
+            label=label,
+        )
+
+    format_oversubscription_axis(ax, cwnd["oversubscription"])
+    ax.set_xlabel("Worker/credit ratio (threads / queue depth)")
+    ax.set_ylabel("Requests")
+    ax.set_title("Global AIMD window and in-flight requests")
+    ax.legend()
+    return savefig(out_dir, "aimd_global_window", fmt, dpi)
 
 
 def write_summary(df: pd.DataFrame, out_dir: Path) -> Path:
@@ -295,6 +360,10 @@ def write_summary(df: pd.DataFrame, out_dir: Path) -> Path:
         "admission_rejections_per_completion",
         "avg_cwnd",
         "avg_inflight",
+        "global_avg_cwnd",
+        "global_avg_inflight",
+        "global_max_inflight",
+        "global_window_pressure",
     ]
     metrics = [metric for metric in metrics if metric in df.columns]
     summary = df.groupby(
@@ -330,9 +399,9 @@ def main() -> None:
         plot_vs_oversubscription(
             df,
             "delay_p99_ms",
-            "Admitted-request p99 latency (ms)",
-            "Admitted-request p99 vs worker/credit oversubscription",
-            "oversubscription_vs_admitted_p99",
+            "Logical-request end-to-end p99 latency (ms)",
+            "Logical-request p99 vs worker/credit oversubscription",
+            "oversubscription_vs_logical_request_p99",
             args.out_dir,
             args.fmt,
             args.dpi,
@@ -340,9 +409,20 @@ def main() -> None:
         plot_vs_oversubscription(
             df,
             "acceptance_rate_pct",
-            "Acceptance rate: success / attempts (%)",
-            "Acceptance rate vs worker/credit oversubscription",
+            "Admission-attempt success: success / attempts (%)",
+            "Admission-attempt success vs worker/credit oversubscription",
             "oversubscription_vs_acceptance",
+            args.out_dir,
+            args.fmt,
+            args.dpi,
+            ylim=(0.0, 105.0),
+        ),
+        plot_vs_oversubscription(
+            df,
+            "admission_rejections_per_completion",
+            "Admission rejections / completed request",
+            "Admission rejections vs worker/credit oversubscription",
+            "oversubscription_vs_rejections_per_completion",
             args.out_dir,
             args.fmt,
             args.dpi,
@@ -350,6 +430,11 @@ def main() -> None:
         plot_tradeoff(df, args.out_dir, args.fmt, args.dpi),
         write_summary(df, args.out_dir),
     ]
+    aimd_window = plot_aimd_global_window(
+        df, args.out_dir, args.fmt, args.dpi
+    )
+    if aimd_window is not None:
+        generated.append(aimd_window)
 
     manifest = args.out_dir / "figure_manifest.txt"
     with manifest.open("w", encoding="utf-8") as file:
@@ -361,8 +446,8 @@ def main() -> None:
         )
         file.write(f"Rows used: {len(df)}\n\n")
         file.write(
-            "Interpretation: p99 covers admitted/completed requests only; "
-            "read it together with acceptance rate.\n\n"
+            "Interpretation: retry-based policy p99 includes admission waiting "
+            "and backoff; acceptance is admission-attempt success rate.\n\n"
         )
         for path in generated:
             file.write(path.name + "\n")

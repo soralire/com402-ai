@@ -50,10 +50,15 @@ static void complete_request(cxl_fabric_t *fabric, cxl_request_t *req) {
     pthread_mutex_lock(&req->lock);
     req->complete_ns = complete_ns;
     req->done = 1;
+
+    /*
+     * Make the completed request's fabric credit available before waking the
+     * submitting worker. Otherwise the worker can wake up, immediately try to
+     * submit its next request, and observe a transient false queue-full event.
+     */
+    sem_post(&fabric->credits);
     pthread_cond_signal(&req->done_cond);
     pthread_mutex_unlock(&req->lock);
-
-    sem_post(&fabric->credits);
 }
 
 static void *device_worker_main(void *p) {

@@ -31,6 +31,9 @@ typedef struct {
     double avg_cwnd;
     double avg_inflight;
     double goodput;
+    double global_avg_cwnd;
+    double global_avg_inflight;
+    uint64_t global_max_inflight;
 } summary_stats_t;
 
 int thread_stats_init(thread_stats_t *s, uint64_t latency_capacity);

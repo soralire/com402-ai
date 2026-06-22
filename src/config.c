@@ -15,7 +15,7 @@ void print_usage(const char *prog) {
             "Usage:\n"
             "  %s <mode> <load> <threads> <seconds> [mem_node] [cpu_node] [seed] [mem_mb] [touches_per_req] [queue_depth] [device_workers]\n\n"
             "Required:\n"
-            "  mode            0=random blocking switch access, 1=csma non-blocking switch access, 2=aimd adaptive switch injection\n"
+            "  mode            0=random blocking switch access, 1=csma retained-request backoff, 2=global aimd adaptive injection\n"
             "  load            1~100\n"
             "  threads         worker thread count\n"
             "  seconds         runtime seconds\n\n"
