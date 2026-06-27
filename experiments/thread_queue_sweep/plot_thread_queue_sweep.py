@@ -1,16 +1,4 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Plot the worker/credit oversubscription experiment.
 
-The policies have different pacing semantics:
-
-* random blocks until a fabric credit is available;
-* csma and aimd retain a logical request across failed admission attempts;
-* aimd uses one global shared congestion window across all workers.
-
-Latency for retry-based policies includes admission waiting and backoff.
-"""
 
 from __future__ import annotations
 

@@ -1,22 +1,4 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Comprehensive plotting program for cxl_numa_csma thread/queue sweep results.
 
-It reads either thread_queue_clean.csv or raw CSV files that contain repeated
-headers, normalizes old/new schemas, derives key metrics, and generates figures
-that show throughput, latency, contention, scaling, and throughput-latency
-trade-offs.
-
-Usage from project root:
-    python3 experiments/thread_queue_sweep/plot_thread_queue_comprehensive.py
-
-Common custom usage:
-    python3 experiments/thread_queue_sweep/plot_thread_queue_comprehensive.py \
-        --csv results/thread_queue_sweep/thread_queue_clean.csv \
-        --out-dir results/thread_queue_sweep/figures_comprehensive \
-        --format png --dpi 300
-"""
 
 from __future__ import annotations
 

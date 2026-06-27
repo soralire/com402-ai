@@ -116,11 +116,9 @@ outputs are grouped under `results/` by experiment name.
 ```text
 experiments/
   thread_queue_sweep/     original thread/queue/device-worker sweep
-  near_remote_memory/     local-vs-remote NUMA memory comparison
 
 results/
   thread_queue_sweep/     outputs from the original sweep
-  near_remote_memory/     outputs from the local-vs-remote comparison
 ```
 
 ### Thread/Queue Sweep
@@ -169,44 +167,7 @@ Generate figures:
 python3 experiments/thread_queue_sweep/plot_thread_queue_sweep.py
 ```
 
-Run a shorter AIMD-only regression with:
 
-```bash
-bash experiments/thread_queue_sweep/run_aimd_validation.sh
-```
-
-### Near/Remote Memory Comparison
-
-The near/remote comparison keeps the experiment small and changes only the
-backend memory node:
-
-```text
-cpu_node:        0
-mem_nodes:       0 1
-threads:         8
-duration:        10 seconds
-seed:            1
-touches_per_req: 4096
-loads:           10 30 50 70 90
-modes:           0 1 2
-queue_depth:     4
-device_workers:  1
-```
-
-Run it:
-
-```bash
-./experiments/near_remote_memory/run_near_remote.sh
-```
-
-The script writes `near_remote_raw.csv`, `near_remote_clean.csv`, and
-`experiment_plan.txt` to `results/near_remote_memory/`.
-
-Generate figures:
-
-```bash
-python3 experiments/near_remote_memory/plot_near_remote.py
-```
 
 ## Code Layout
 
@@ -220,6 +181,4 @@ python3 experiments/near_remote_memory/plot_near_remote.py
   requests.
 - `experiments/thread_queue_sweep/`: original thread/queue sweep runner and
   plotting script.
-- `experiments/near_remote_memory/`: local-vs-remote memory comparison runner
-  and plotting script.
 - `scripts/`: compatibility wrappers for older command paths.
